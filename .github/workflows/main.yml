@@ -1,0 +1,31 @@
+name: "Detector"
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  scan:
+    runs-on: [self-hosted, Linux, X64]
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Ensure ollama is installed
+        run: |
+          curl -sf http://localhost:11434/api/tags >/dev/null || (ollama serve & sleep 3)
+
+      - name: Run intent gate
+        env:
+          MODEL: qwen2.5-coder:3b
+          BLOCK_THRESHOLD: "7"
+          REVIEW_THRESHOLD: "4"
+        run: |
+          python3 detector/scan.py --git-base "origin/${{ github.base_ref }}"
+          # non-zero exit on 'block' fails this step -> fails the required check
