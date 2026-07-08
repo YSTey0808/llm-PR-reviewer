@@ -1,26 +1,27 @@
-name: intent-gate
-on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths-ignore:
-      - 'samples/**'
-      - 'prompts/**'
-jobs:
-  scan:
-    runs-on: [self-hosted, Linux, X64]
-    permissions:
-      contents: read
-      checks: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Ensure ollama is up
-        run: curl -sf http://localhost:11434/api/tags >/dev/null || (ollama serve & sleep 3)
-      - name: Run intent gate
-        env:
-          MODEL: qwen2.5-coder:3b
-          BLOCK_THRESHOLD: "7"
-          REVIEW_THRESHOLD: "4"
-          PROMPT_FILE: prompts/intent.md
-        run: python3 detector/scan.py --git-base "origin/${{ github.base_ref }}"
+name: "Intent Gate"
+description: "LLM malicious-intent gate for PR diffs."
+inputs:
+  model:
+    default: "qwen2.5-coder:3b"
+  block-threshold:
+    default: "7"
+  review-threshold:
+    default: "4"
+runs:
+  using: "composite"
+  steps:
+    - name: Ensure Ollama and model
+      shell: bash
+      run: |
+        curl -sf http://localhost:11434/api/tags >/dev/null || (ollama serve & sleep 3)
+        ollama list | grep -q "${{ inputs.model }}" || ollama pull "${{ inputs.model }}"
+    - name: Run intent gate
+      shell: bash
+      env:
+        MODEL: ${{ inputs.model }}
+        BLOCK_THRESHOLD: ${{ inputs.block-threshold }}
+        REVIEW_THRESHOLD: ${{ inputs.review-threshold }}
+      run: |
+        export PROMPT_FILE="$GITHUB_ACTION_PATH/prompts/intent.md"
+        BASE="${GITHUB_BASE_REF}"
+        python3 "$GITHUB_ACTION_PATH/detector/scan.py" --git-base "origin/$BASE"
