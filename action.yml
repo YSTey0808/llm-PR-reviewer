@@ -42,7 +42,7 @@ inputs:
   request-timeout:
     description: "Per-request read timeout in seconds for each Ollama call. Raise on slow/CPU-only runners."
     required: false
-    default: "180"
+    default: "600"
   num-ctx:
     description: "Ollama context window (tokens). Larger handles bigger diffs but uses more RAM and is slower; lower it on CPU-only runners. Must match between warm-up and scan."
     required: false
