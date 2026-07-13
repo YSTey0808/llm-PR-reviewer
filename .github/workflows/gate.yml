@@ -15,7 +15,7 @@ jobs:
     permissions:
       contents: read
       checks: write
-      pull-requests: write   # needed for the sticky PR comment
+      pull-requests: write # needed for the sticky PR comment
     steps:
       - uses: actions/checkout@v3
         with:
@@ -24,7 +24,7 @@ jobs:
       - name: Intent gate
         uses: ./
         with:
-          model: qwen2.5-coder:7b
+          model: qwen2.5-coder:3b
           block-threshold: "70"
           review-threshold: "40"
           # Fail-closed (block on scan error) for PRs into the protected branch;
