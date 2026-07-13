@@ -39,6 +39,14 @@ inputs:
     description: "On a scan error, block instead of failing open to review. Set true for protected/release branches; leave false on feature branches for dev experience."
     required: false
     default: "false"
+  request-timeout:
+    description: "Per-request read timeout in seconds for each Ollama call. Raise on slow/CPU-only runners."
+    required: false
+    default: "180"
+  num-ctx:
+    description: "Ollama context window (tokens). Larger handles bigger diffs but uses more RAM and is slower; lower it on CPU-only runners. Must match between warm-up and scan."
+    required: false
+    default: "4096"
 
 runs:
   using: "composite"
@@ -46,10 +54,25 @@ runs:
     - name: Ensure Ollama and model are ready
       shell: bash
       run: |
-        curl -sf http://localhost:11434/api/tags >/dev/null || (ollama serve & sleep 3)
+        # Ollama runs as a persistent systemd service on the runner. Do NOT start
+        # our own — `ollama serve &` dies when this step ends (connection-refused,
+        # Errno 111, mid-scan). Just wait for the existing service to be ready.
+        for i in $(seq 1 15); do curl -sf localhost:11434/api/tags >/dev/null && break; sleep 2; done
+        curl -sf localhost:11434/api/tags >/dev/null || { echo "Ollama not up on :11434"; exit 1; }
         if ! ollama list | grep -q "${{ inputs.model }}"; then
           ollama pull "${{ inputs.model }}"
         fi
+        # Warm the model into memory here — a cold start (loading weights +
+        # allocating the num_ctx KV cache) can take a while on the first call.
+        # Paying that cost in this untimed setup step keeps it out of scan.py's
+        # per-request timeout. keep_alive holds the model loaded for the scan.
+        # CRITICAL: warm with the SAME num_ctx scan.py uses — Ollama keys a
+        # loaded model by its options, so a mismatched context forces a full
+        # reload inside the timed scan call, wasting the warm-up.
+        echo "Warming ${{ inputs.model }} at num_ctx=${{ inputs.num-ctx }} (first load can take a while)..."
+        curl -sf http://localhost:11434/api/generate \
+          -d "{\"model\":\"${{ inputs.model }}\",\"prompt\":\"ok\",\"stream\":false,\"keep_alive\":\"30m\",\"options\":{\"num_ctx\":${{ inputs.num-ctx }}}}" \
+          >/dev/null || echo "warm-up call failed; scan will cold-start"
 
     - name: Run intent gate
       shell: bash
@@ -58,6 +81,8 @@ runs:
         BLOCK_THRESHOLD: ${{ inputs.block-threshold }}
         REVIEW_THRESHOLD: ${{ inputs.review-threshold }}
         FAIL_CLOSED: ${{ inputs.fail-closed }}
+        REQUEST_TIMEOUT: ${{ inputs.request-timeout }}
+        NUM_CTX: ${{ inputs.num-ctx }}
       run: |
         # scan.py + prompts come from THIS tool repo via $GITHUB_ACTION_PATH.
         # The diff is taken from the CONSUMER repo (the current working directory).

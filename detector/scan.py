@@ -31,9 +31,9 @@ Usage:
 Env (defaults shown):
   OLLAMA_URL http://localhost:11434 | MODEL qwen2.5-coder:3b
   PROMPT_FILE prompts/intent.md | COMMENT_FILE comment.md
-  BLOCK_THRESHOLD 70 | REVIEW_THRESHOLD 40 | MAX_CHARS 24000 | NUM_CTX 16384
-  FAIL_SAFE review | REQUEST_TIMEOUT 120 | RETRY_BACKOFF 2 | RETRIES 3
-  INJECTION_FLOOR 55 | FAIL_CLOSED false
+  BLOCK_THRESHOLD 70 | REVIEW_THRESHOLD 40 | MAX_CHARS 16000 | NUM_CTX 4096
+  NUM_PREDICT 512 | FAIL_SAFE review | REQUEST_TIMEOUT 180 | RETRY_BACKOFF 2
+  RETRIES 3 | INJECTION_FLOOR 55 | FAIL_CLOSED false
 """
 
 import argparse
@@ -53,14 +53,21 @@ PROMPT_FILE = os.environ.get("PROMPT_FILE", "prompts/intent.md")
 COMMENT_FILE = os.environ.get("COMMENT_FILE", "comment.md")
 BLOCK = int(os.environ.get("BLOCK_THRESHOLD", "70"))
 REVIEW = int(os.environ.get("REVIEW_THRESHOLD", "40"))
-MAX_CHARS = int(os.environ.get("MAX_CHARS", "24000"))
+MAX_CHARS = int(os.environ.get("MAX_CHARS", "16000"))
 # Ollama's context window. Its default (2048 tokens) is smaller than MAX_CHARS,
 # so without this the prompt is SILENTLY truncated by Ollama before the model
-# sees it. Sized to hold the system prompt + a MAX_CHARS diff (~6000 tokens) +
-# output headroom. Bigger = more RAM/slower on the runner.
-NUM_CTX = int(os.environ.get("NUM_CTX", "16384"))
+# sees it. Sized to hold the system prompt + a MAX_CHARS diff (~4000 tokens) +
+# output headroom. Bigger = more RAM/slower on the runner; the action warms the
+# model with this SAME value so the timed scan call reuses the loaded model.
+NUM_CTX = int(os.environ.get("NUM_CTX", "4096"))
+# Hard ceiling on generated tokens. Without it, under constrained JSON decoding
+# a small model can run away generating until it hits the context limit, blowing
+# past REQUEST_TIMEOUT. This is the primary guard against inference timeouts.
+NUM_PREDICT = int(os.environ.get("NUM_PREDICT", "512"))
 FAIL_SAFE = os.environ.get("FAIL_SAFE", "review")   # verdict floor on infra error
-REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "120"))
+# Per-request read timeout. Sized for a warm model; the action warms the model
+# in its setup step so this budget isn't spent on the first-call cold start.
+REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "180"))
 RETRY_BACKOFF = float(os.environ.get("RETRY_BACKOFF", "2"))
 RETRIES = max(1, int(os.environ.get("RETRIES", "3")))
 # Fail-closed policy: on a protected/release branch, treat scan errors as a
@@ -186,7 +193,9 @@ def call_model(system, user, schema):
         ],
         "stream": False,
         "format": schema,                       # structured output
-        "options": {"temperature": 0, "seed": 7, "num_ctx": NUM_CTX},
+        "keep_alive": -1,                       # keep model resident between calls
+        "options": {"temperature": 0, "seed": 7, "num_ctx": NUM_CTX,
+                    "num_predict": NUM_PREDICT},
     }
     req = urllib.request.Request(
         f"{OLLAMA_URL}/api/chat",
@@ -232,7 +241,7 @@ def coerce_result(raw):
         "key_changes": [str(c) for c in (obj.get("key_changes") or [])],
         "suspicious_findings": findings,
         "reasoning": str(obj.get("reasoning", "")).strip(),
-    }
+    }   
 
 
 def review_diff(hunks, system):
