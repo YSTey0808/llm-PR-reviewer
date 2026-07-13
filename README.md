@@ -84,7 +84,8 @@ This repo dogfoods the action against its own PRs — see [`.github/workflows/ga
 | `review-threshold` | `40`               | Score at/above which the verdict is **review**.                    |
 | `comment`          | `true`             | Post/update the sticky PR comment.                                 |
 | `fail-closed`      | `false`            | On a scan error, **block** instead of failing open to `review`. Set `true` for protected/release branches. |
-| `request-timeout`  | `300`              | Per-request read timeout (seconds) for each Ollama call. Raise on slow/CPU-only runners. |
+| `request-timeout`  | `600`              | Per-request read timeout (seconds) for each Ollama call. Raise on slow/CPU-only runners. |
+| `num-ctx`          | `8192`             | Ollama context window (tokens). Lower on CPU-only runners for speed; must cover the system prompt + diff. |
 
 ## Usage (local / hand testing)
 
@@ -158,14 +159,14 @@ All action inputs map to these; set them directly for local runs.
 | `COMMENT_FILE`     | `comment.md`              | Where the rendered markdown comment is written.         |
 | `BLOCK_THRESHOLD`  | `70`                      | Block at/above this score.                              |
 | `REVIEW_THRESHOLD` | `40`                      | Review at/above this score.                             |
-| `MAX_CHARS`        | `24000`                   | Diff character cap before truncation.                   |
-| `NUM_CTX`          | `16384`                   | Ollama context window (keep above `MAX_CHARS` worth of tokens + prompt). |
+| `MAX_CHARS`        | `16000`                   | Diff character cap before truncation.                   |
+| `NUM_CTX`          | `8192`                    | Ollama context window (keep above `MAX_CHARS` worth of tokens + prompt). |
 | `INJECTION_FLOOR`  | `55`                      | Score floor when injection markers are found.           |
 | `FAIL_SAFE`        | `review`                  | Verdict floor on infra error.                           |
 | `FAIL_CLOSED`      | `false`                   | Escalate scan errors to `block`.                        |
 | `RETRIES`          | `3`                       | Attempts before failing safe.                           |
 | `RETRY_BACKOFF`    | `2`                       | Base seconds for exponential backoff.                   |
-| `REQUEST_TIMEOUT`  | `300`                     | Per-request timeout (seconds). Raise on slow runners.   |
+| `REQUEST_TIMEOUT`  | `600`                     | Per-request timeout (seconds). Raise on slow runners.   |
 
 ## Tuning accuracy
 
