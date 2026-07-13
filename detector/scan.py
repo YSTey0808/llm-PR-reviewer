@@ -241,7 +241,7 @@ def coerce_result(raw):
         "key_changes": [str(c) for c in (obj.get("key_changes") or [])],
         "suspicious_findings": findings,
         "reasoning": str(obj.get("reasoning", "")).strip(),
-    }
+    }   
 
 
 def review_diff(hunks, system):
