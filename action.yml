@@ -7,6 +7,10 @@
 #   permissions:
 #     pull-requests: write
 # Set input `comment: "false"` to disable it.
+#
+# scan.py writes the rendered review to comment.md; the comment step below
+# posts/updates it with the gh CLI, keyed off the hidden HTML marker on the
+# comment's first line so re-runs edit the same comment.
 # ============================================================
 name: "Intent Gate"
 description: "LLM-based malicious-intent gate for PR diffs, self-hosted via local Ollama."
@@ -20,17 +24,21 @@ inputs:
     required: false
     default: "qwen2.5-coder:3b"
   block-threshold:
-    description: "Score at/above which the verdict is block (fails the check)"
+    description: "Risk score (0-100) at/above which the verdict is block (fails the check)"
     required: false
-    default: "7"
+    default: "70"
   review-threshold:
-    description: "Score at/above which the verdict is review"
+    description: "Risk score (0-100) at/above which the verdict is review"
     required: false
-    default: "4"
+    default: "40"
   comment:
-    description: "Post/update a sticky PR comment with the summary and findings"
+    description: "Post/update a sticky PR comment with the review"
     required: false
     default: "true"
+  fail-closed:
+    description: "On a scan error, block instead of failing open to review. Set true for protected/release branches; leave false on feature branches for dev experience."
+    required: false
+    default: "false"
 
 runs:
   using: "composite"
@@ -49,6 +57,7 @@ runs:
         MODEL: ${{ inputs.model }}
         BLOCK_THRESHOLD: ${{ inputs.block-threshold }}
         REVIEW_THRESHOLD: ${{ inputs.review-threshold }}
+        FAIL_CLOSED: ${{ inputs.fail-closed }}
       run: |
         # scan.py + prompts come from THIS tool repo via $GITHUB_ACTION_PATH.
         # The diff is taken from the CONSUMER repo (the current working directory).
@@ -56,64 +65,34 @@ runs:
         # is not allowed inside an action file and was the cause of earlier errors.
         #
         # `shell: bash` enables pipefail, so a 'block' (exit 1) still fails this
-        # step through the tee. tee keeps the ::error/::warning annotation lines
-        # on the step's stdout (inline PR annotations) while intent-gate-result.json
-        # feeds the comment step below.
+        # step through the tee. tee keeps the result JSON visible in the step log
+        # while intent-gate-result.json stays available for tooling. scan.py also
+        # writes comment.md (the rendered markdown) into the working directory.
         export PROMPT_FILE="$GITHUB_ACTION_PATH/prompts/intent.md"
-        export SUMMARY_PROMPT_FILE="$GITHUB_ACTION_PATH/prompts/summary.md"
         python3 "$GITHUB_ACTION_PATH/detector/scan.py" --git-base "origin/$GITHUB_BASE_REF" --verbose | tee intent-gate-result.json
 
-    - name: Post sticky PR comment (summary + verdict)
+    - name: Post sticky PR comment
       if: ${{ always() && github.event_name == 'pull_request' && inputs.comment == 'true' }}
-      uses: actions/github-script@v7
-      with:
-        script: |
-          const fs = require('fs');
-          const marker = '<!-- intent-gate-comment -->';
-          let out;
-          try {
-            const raw = fs.readFileSync('intent-gate-result.json', 'utf8');
-            // Drop the ::error/::warning annotation lines that follow the JSON.
-            const json = raw.split('\n').filter(l => !l.startsWith('::')).join('\n');
-            out = JSON.parse(json);
-          } catch (e) {
-            core.warning('intent gate produced no parseable result file: ' + e.message);
-            return;
-          }
-          const icon = { pass: '✅', review: '⚠️', block: '⛔' }[out.verdict] || '❓';
-          let body = `${marker}\n## ${icon} Intent gate: ${String(out.verdict).toUpperCase()} (score ${out.score})\n`;
-          if (out.summary) {
-            body += `\n**What this PR does:** ${out.summary}\n`;
-          }
-          const findings = out.findings || [];
-          if (findings.length) {
-            body += '\n| File | Line | Type | Confidence | Rationale |\n|---|---|---|---|---|\n';
-            for (const f of findings) {
-              const rat = String(f.rationale || '').replace(/\|/g, '\\|');
-              body += `| \`${f.file}\` | ${f.line ?? ''} | ${f.type} | ${f.confidence} | ${rat} |\n`;
-            }
-          } else {
-            body += '\nNo findings.\n';
-          }
-          const { data: comments } = await github.rest.issues.listComments({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: context.issue.number,
-            per_page: 100,
-          });
-          const prev = comments.find(c => c.body && c.body.startsWith(marker));
-          if (prev) {
-            await github.rest.issues.updateComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              comment_id: prev.id,
-              body,
-            });
-          } else {
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body,
-            });
-          }
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+      run: |
+        # Sticky comment: find a previous comment whose body starts with the
+        # hidden marker (written by scan.py as comment.md's first line) and
+        # PATCH it; otherwise create a new one.
+        if [ ! -f comment.md ]; then
+          echo "no comment.md produced; skipping PR comment"
+          exit 0
+        fi
+        marker='<!-- intent-gate-comment -->'
+        prev=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+               --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -n1)
+        if [ -n "$prev" ]; then
+          gh api -X PATCH "repos/$REPO/issues/comments/$prev" -F body=@comment.md >/dev/null
+          echo "updated existing sticky comment $prev"
+        else
+          gh api "repos/$REPO/issues/$PR/comments" -F body=@comment.md >/dev/null
+          echo "created new sticky comment"
+        fi

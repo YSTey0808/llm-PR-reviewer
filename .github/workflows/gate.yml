@@ -24,6 +24,10 @@ jobs:
       - name: Intent gate
         uses: ./
         with:
-          model: qwen2.5-coder:3b
-          block-threshold: "7"
-          review-threshold: "4"
+          model: qwen2.5-coder:7b
+          block-threshold: "70"
+          review-threshold: "40"
+          # Fail-closed (block on scan error) for PRs into the protected branch;
+          # feature branches stay fail-open to 'review'. Adjust the branch list
+          # for your repo, or set "false" to keep everything fail-open.
+          fail-closed: ${{ github.base_ref == 'main' }}
