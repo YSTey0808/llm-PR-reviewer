@@ -83,18 +83,39 @@ runs:
         FAIL_CLOSED: ${{ inputs.fail-closed }}
         REQUEST_TIMEOUT: ${{ inputs.request-timeout }}
         NUM_CTX: ${{ inputs.num-ctx }}
+        # Context values are read into env vars here (the safe place for
+        # ${{ github.* }} in a composite action) and used from the script below,
+        # never interpolated directly into the run: block.
+        EVENT_NAME: ${{ github.event_name }}
+        EVENT_BEFORE: ${{ github.event.before }}
       run: |
         # scan.py + prompts come from THIS tool repo via $GITHUB_ACTION_PATH.
         # The diff is taken from the CONSUMER repo (the current working directory).
-        # NOTE: use $GITHUB_BASE_REF (bash), NOT ${{ github.base_ref }} — the latter
-        # is not allowed inside an action file and was the cause of earlier errors.
+        #
+        # Choose the base to diff HEAD against by trigger type:
+        #   - pull_request: the PR's base branch (origin/<base_ref>). $GITHUB_BASE_REF
+        #     is only populated for pull_request events.
+        #   - push (e.g. a merge landing on main): the commit BEFORE this push
+        #     (github.event.before). On a brand-new branch that SHA is all-zeros,
+        #     so fall back to HEAD's parent (fetch-depth: 0 makes it available).
+        # scan.py diffs `<base>...HEAD`, so on a push `before...HEAD` is exactly
+        # the changes the push introduced.
         #
         # `shell: bash` enables pipefail, so a 'block' (exit 1) still fails this
         # step through the tee. tee keeps the result JSON visible in the step log
         # while intent-gate-result.json stays available for tooling. scan.py also
         # writes comment.md (the rendered markdown) into the working directory.
         export PROMPT_FILE="$GITHUB_ACTION_PATH/prompts/intent.md"
-        python3 "$GITHUB_ACTION_PATH/detector/scan.py" --git-base "origin/$GITHUB_BASE_REF" --verbose | tee intent-gate-result.json
+        if [ "$EVENT_NAME" = "pull_request" ]; then
+          BASE="origin/$GITHUB_BASE_REF"
+        else
+          BASE="$EVENT_BEFORE"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            BASE="$(git rev-parse HEAD^ 2>/dev/null || echo HEAD)"
+          fi
+        fi
+        echo "Diffing HEAD against base: $BASE (event=$EVENT_NAME)"
+        python3 "$GITHUB_ACTION_PATH/detector/scan.py" --git-base "$BASE" --verbose | tee intent-gate-result.json
 
     - name: Post sticky PR comment
       if: ${{ always() && github.event_name == 'pull_request' && inputs.comment == 'true' }}
