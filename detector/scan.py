@@ -48,7 +48,7 @@ import urllib.error
 import urllib.request
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-MODEL = os.environ.get("MODEL", "qwen2.5-coder:3b")
+MODEL = os.environ.get("MODEL", "qwen2.5-coder:7b")
 PROMPT_FILE = os.environ.get("PROMPT_FILE", "prompts/intent.md")
 COMMENT_FILE = os.environ.get("COMMENT_FILE", "comment.md")
 BLOCK = int(os.environ.get("BLOCK_THRESHOLD", "70"))
