@@ -84,6 +84,7 @@ This repo dogfoods the action against its own PRs — see [`.github/workflows/ga
 | `review-threshold` | `40`               | Score at/above which the verdict is **review**.                    |
 | `comment`          | `true`             | Post/update the sticky PR comment.                                 |
 | `fail-closed`      | `false`            | On a scan error, **block** instead of failing open to `review`. Set `true` for protected/release branches. |
+| `request-timeout`  | `300`              | Per-request read timeout (seconds) for each Ollama call. Raise on slow/CPU-only runners. |
 
 ## Usage (local / hand testing)
 
@@ -164,7 +165,7 @@ All action inputs map to these; set them directly for local runs.
 | `FAIL_CLOSED`      | `false`                   | Escalate scan errors to `block`.                        |
 | `RETRIES`          | `3`                       | Attempts before failing safe.                           |
 | `RETRY_BACKOFF`    | `2`                       | Base seconds for exponential backoff.                   |
-| `REQUEST_TIMEOUT`  | `120`                     | Per-request timeout (seconds).                          |
+| `REQUEST_TIMEOUT`  | `300`                     | Per-request timeout (seconds). Raise on slow runners.   |
 
 ## Tuning accuracy
 

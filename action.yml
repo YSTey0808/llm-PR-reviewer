@@ -39,6 +39,10 @@ inputs:
     description: "On a scan error, block instead of failing open to review. Set true for protected/release branches; leave false on feature branches for dev experience."
     required: false
     default: "false"
+  request-timeout:
+    description: "Per-request read timeout in seconds for each Ollama call. Raise on slow/CPU-only runners."
+    required: false
+    default: "300"
 
 runs:
   using: "composite"
@@ -50,6 +54,14 @@ runs:
         if ! ollama list | grep -q "${{ inputs.model }}"; then
           ollama pull "${{ inputs.model }}"
         fi
+        # Warm the model into memory here — a 7b cold start (loading weights +
+        # allocating the num_ctx KV cache) can take minutes on the first call.
+        # Paying that cost in this untimed setup step keeps it out of scan.py's
+        # per-request timeout. keep_alive holds the model loaded for the scan.
+        echo "Warming ${{ inputs.model }} (first load can take a while)..."
+        curl -sf http://localhost:11434/api/generate \
+          -d "{\"model\":\"${{ inputs.model }}\",\"prompt\":\"ok\",\"stream\":false,\"keep_alive\":\"30m\"}" \
+          >/dev/null || echo "warm-up call failed; scan will cold-start"
 
     - name: Run intent gate
       shell: bash
@@ -58,6 +70,7 @@ runs:
         BLOCK_THRESHOLD: ${{ inputs.block-threshold }}
         REVIEW_THRESHOLD: ${{ inputs.review-threshold }}
         FAIL_CLOSED: ${{ inputs.fail-closed }}
+        REQUEST_TIMEOUT: ${{ inputs.request-timeout }}
       run: |
         # scan.py + prompts come from THIS tool repo via $GITHUB_ACTION_PATH.
         # The diff is taken from the CONSUMER repo (the current working directory).

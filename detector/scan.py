@@ -32,7 +32,7 @@ Env (defaults shown):
   OLLAMA_URL http://localhost:11434 | MODEL qwen2.5-coder:3b
   PROMPT_FILE prompts/intent.md | COMMENT_FILE comment.md
   BLOCK_THRESHOLD 70 | REVIEW_THRESHOLD 40 | MAX_CHARS 24000 | NUM_CTX 16384
-  FAIL_SAFE review | REQUEST_TIMEOUT 120 | RETRY_BACKOFF 2 | RETRIES 3
+  FAIL_SAFE review | REQUEST_TIMEOUT 300 | RETRY_BACKOFF 2 | RETRIES 3
   INJECTION_FLOOR 55 | FAIL_CLOSED false
 """
 
@@ -60,7 +60,9 @@ MAX_CHARS = int(os.environ.get("MAX_CHARS", "24000"))
 # output headroom. Bigger = more RAM/slower on the runner.
 NUM_CTX = int(os.environ.get("NUM_CTX", "16384"))
 FAIL_SAFE = os.environ.get("FAIL_SAFE", "review")   # verdict floor on infra error
-REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "120"))
+# Per-request read timeout. Sized for a warm model; the action warms the model
+# in its setup step so this budget isn't spent on the first-call cold start.
+REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "300"))
 RETRY_BACKOFF = float(os.environ.get("RETRY_BACKOFF", "2"))
 RETRIES = max(1, int(os.environ.get("RETRIES", "3")))
 # Fail-closed policy: on a protected/release branch, treat scan errors as a
