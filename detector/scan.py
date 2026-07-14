@@ -3,10 +3,11 @@
 Malicious-intent PR gate — detector (Python standard library only).
 
 Reads a diff, sends the changed hunks (only) to a LOCAL Ollama model in ONE
-call, and gets back a structured review: what the PR does, a 0-100 risk score,
-key changes, and suspicious findings. The result is rendered as a markdown
-comment (comment.md) for a sticky PR comment, printed as JSON on stdout, and
-the risk score is gated so CI can fail the check on 'block'.
+call, and gets back a structured security review: key changes, suspicious
+findings, security reasoning, and — generated LAST, conditioned on that
+reasoning — a 0-100 risk score. The result is rendered as a markdown comment
+(comment.md) for a sticky PR comment, printed as JSON on stdout, and the risk
+score is gated so CI can fail the check on 'block'.
 
 Design notes for small local models:
   - Structured output: passes a JSON *schema* to Ollama's `format` option so
@@ -93,12 +94,12 @@ INJECTION = re.compile(
 )
 
 # JSON schema handed to Ollama's structured-output "format" — constrains the
-# model to emit exactly this shape.
+# model to emit exactly this shape. Ollama emits properties in declaration
+# order under grammar-constrained decoding, so risk_score is placed LAST: the
+# score is generated after (and conditioned on) the reasoning tokens.
 SCHEMA = {
     "type": "object",
     "properties": {
-        "intent_summary": {"type": "string"},
-        "risk_score": {"type": "integer", "minimum": 0, "maximum": 100},
         "key_changes": {"type": "array", "items": {"type": "string"}},
         "suspicious_findings": {
             "type": "array",
@@ -112,9 +113,10 @@ SCHEMA = {
             },
         },
         "reasoning": {"type": "string"},
+        "risk_score": {"type": "integer", "minimum": 0, "maximum": 100},
     },
-    "required": ["intent_summary", "risk_score", "key_changes",
-                 "suspicious_findings", "reasoning"],
+    "required": ["key_changes", "suspicious_findings", "reasoning",
+                 "risk_score"],
 }
 
 _ZERO_WIDTH = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"), None)
@@ -236,12 +238,11 @@ def coerce_result(raw):
             findings.append({"file": str(f.get("file", "unknown")),
                              "reason": str(f.get("reason", ""))[:400]})
     return {
-        "intent_summary": str(obj.get("intent_summary", "")).strip(),
         "risk_score": max(0, min(100, score)),
         "key_changes": [str(c) for c in (obj.get("key_changes") or [])],
         "suspicious_findings": findings,
         "reasoning": str(obj.get("reasoning", "")).strip(),
-    }   
+    }
 
 
 def review_diff(hunks, system):
@@ -329,9 +330,6 @@ def render_markdown(result, verdict, failsafe=None, truncated=None, injection=Fa
             "",
         ]
     lines += [
-        "### Summary",
-        result["intent_summary"] or "_No summary produced._",
-        "",
         "### Risk Score",
         f"**{result['risk_score']} / 100** — {risk_band(result['risk_score'])}",
         "",
@@ -350,8 +348,7 @@ def render_markdown(result, verdict, failsafe=None, truncated=None, injection=Fa
     else:
         lines.append("None. ✅")
     if result["reasoning"]:
-        lines += ["", "<details><summary>Model reasoning</summary>", "",
-                  result["reasoning"], "", "</details>"]
+        lines += ["", "### Why this score", "", result["reasoning"]]
     return "\n".join(lines) + "\n"
 
 
@@ -371,7 +368,7 @@ def main():
     diff = get_diff(args)
     hunks = extract_hunks(sanitize(diff))
     if not hunks.strip():
-        print(json.dumps({"verdict": "pass", "score": 0, "intent_summary": "",
+        print(json.dumps({"verdict": "pass", "score": 0,
                           "key_changes": [], "suspicious_findings": [],
                           "reasoning": ""}))
         print("No diff content to scan.", file=sys.stderr)
@@ -394,13 +391,13 @@ def main():
         result = review_diff(hunks, system)
     except InfraError as exc:
         failsafe = "infra"
-        result = {"intent_summary": "", "risk_score": 0, "key_changes": [],
+        result = {"risk_score": 0, "key_changes": [],
                   "suspicious_findings": [], "reasoning": ""}
         # Loud, machine-parseable line so the workflow can route to Slack/alerts.
         log(f"FAILSAFE kind=infra fail_closed={FAIL_CLOSED} detail={exc}", force=True)
     except ContentError as exc:
         failsafe = "content"
-        result = {"intent_summary": "", "risk_score": 0, "key_changes": [],
+        result = {"risk_score": 0, "key_changes": [],
                   "suspicious_findings": [], "reasoning": ""}
         log(f"FAILSAFE kind=content fail_closed={FAIL_CLOSED} detail={exc}", force=True)
 
@@ -420,7 +417,6 @@ def main():
     print(json.dumps({"verdict": verdict, "score": result["risk_score"],
                       "truncated": bool(truncated), "injection": injection,
                       "failsafe": failsafe,
-                      "intent_summary": result["intent_summary"],
                       "key_changes": result["key_changes"],
                       "suspicious_findings": result["suspicious_findings"],
                       "reasoning": result["reasoning"]}, indent=2))
