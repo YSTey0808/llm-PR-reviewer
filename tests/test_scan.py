@@ -81,6 +81,18 @@ class TestVerdicts(unittest.TestCase):
         self.assertEqual(scan.escalate("block", "review"), "block")
         self.assertEqual(scan.escalate("pass", "pass"), "pass")
 
+    def test_injection_floor_raises_and_annotates_below_floor(self):
+        r = scan.apply_injection_floor(
+            {"risk_score": 0, "reasoning": "benign"}, 55)
+        self.assertEqual(r["risk_score"], 55)
+        self.assertIn("tripwire", r["reasoning"])
+        self.assertTrue(r["reasoning"].startswith("benign"))
+
+    def test_injection_floor_leaves_higher_score_untouched(self):
+        r = scan.apply_injection_floor(
+            {"risk_score": 80, "reasoning": "bad"}, 55)
+        self.assertEqual((r["risk_score"], r["reasoning"]), (80, "bad"))
+
 
 class TestInjectionRegex(unittest.TestCase):
     def test_matches_markers_but_not_ordinary_code(self):

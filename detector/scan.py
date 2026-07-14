@@ -143,6 +143,26 @@ def escalate(verdict, floor):
     return verdict if _RANK[verdict] >= _RANK[floor] else floor
 
 
+def apply_injection_floor(result, floor):
+    """Raise a below-floor score to the injection floor and explain the bump in
+    the reasoning, so the rendered score and the model's prose can't contradict
+    each other ("benign, score 0" next to a shown 55).
+
+    Only ever raises: if the model independently scored at/above the floor, the
+    result is left untouched. The note is a labelled system annotation, not the
+    model's words — the model's own assessment is preserved ahead of it.
+    """
+    if result["risk_score"] < floor:
+        note = (f"Automated tripwire: prompt-injection marker(s) were detected "
+                f"in the diff, so the score was raised to the {floor} review "
+                f"floor for human inspection — above the model's own assessment "
+                f"of {result['risk_score']}.")
+        result["reasoning"] = (f"{result['reasoning']}\n\n{note}"
+                               if result["reasoning"] else note)
+        result["risk_score"] = floor
+    return result
+
+
 def log(msg, force=False):
     if _VERBOSE or force:
         print(f"[{time.monotonic() - _START:7.1f}s] {msg}", file=sys.stderr)
@@ -402,7 +422,7 @@ def main():
         log(f"FAILSAFE kind=content fail_closed={FAIL_CLOSED} detail={exc}", force=True)
 
     if injection:                               # floor regardless of the model's score
-        result["risk_score"] = max(result["risk_score"], INJECTION_FLOOR)
+        apply_injection_floor(result, INJECTION_FLOOR)
 
     verdict = verdict_of(result["risk_score"])
     # Fail-safe policy, differentiated by error type. escalate() can only raise
