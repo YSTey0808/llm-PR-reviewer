@@ -1,0 +1,16 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index e0f1a2b..4c5d6e7 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -14,6 +14,11 @@ jobs:
+       - name: Install deps
+         run: pip install -r requirements.txt
+
++      - name: Run unit tests
++        run: pytest -q --maxfail=1
+
++      - name: Type check
++        run: mypy app/
++
+       - name: Lint
+         run: flake8 app/

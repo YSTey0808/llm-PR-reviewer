@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($env:MODEL=\"qwen2.5-coder:3b\"; python detector\\\\scan.py --diff samples\\\\benign\\\\add.diff 2>$null)",
+      "PowerShell($env:MODEL=\"qwen2.5-coder:3b\"; python detector\\\\scan.py --diff samples\\\\benign\\\\refactor_rename.diff 2>$null)"
+    ]
+  }
+}

