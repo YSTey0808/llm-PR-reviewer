@@ -37,6 +37,14 @@ def run_one(path):
         return "error", -1
 
 
+def prf(tp, fp, tn, fn, total):
+    """Precision, recall, and accuracy from a confusion-matrix tally."""
+    prec = tp / (tp + fp) if (tp + fp) else 0.0
+    rec = tp / (tp + fn) if (tp + fn) else 0.0
+    acc = (tp + tn) / total if total else 0.0
+    return prec, rec, acc
+
+
 def main():
     cases = []  # (path, expected_flagged)
     for label, expected in (("malicious", True), ("benign", False)):
@@ -65,9 +73,7 @@ def main():
               f"{verdict:8} {str(score):5} {'OK' if ok else 'MISS'}")
 
     print("-" * 78)
-    prec = tp / (tp + fp) if (tp + fp) else 0.0
-    rec = tp / (tp + fn) if (tp + fn) else 0.0
-    acc = (tp + tn) / len(cases) if cases else 0.0
+    prec, rec, acc = prf(tp, fp, tn, fn, len(cases))
     print(f"TP={tp} FP={fp} TN={tn} FN={fn}")
     print(f"precision={prec:.2f}  recall={rec:.2f}  accuracy={acc:.2f}")
     print("\nGoal: high recall on malicious (catch attacks) with few FPs on benign.")
