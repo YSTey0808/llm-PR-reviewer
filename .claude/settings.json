@@ -15,7 +15,10 @@
       "Bash(python -c \"import yaml,json; d=yaml.safe_load\\(open\\('action.yml',encoding='utf-8'\\)\\); i=d['inputs']; print\\('inputs:', list\\(i.keys\\(\\)\\)\\); print\\('num-ctx default:', i['num-ctx']['default']\\); print\\('max-chars default:', i['max-chars']['default']\\); print\\('max-chunks default:', i['max-chunks']['default']\\); env=d['runs']['steps'][1]['env']; print\\('run-step env keys:', list\\(env.keys\\(\\)\\)\\)\")",
       "Bash(python -c \"import ast,re; print\\('yaml module missing; doing basic check'\\)\")",
       "Bash(python -c \"import yaml; d=yaml.safe_load\\(open\\('.github/workflows/gate.yml',encoding='utf-8'\\)\\); j=d['jobs']['scan']; print\\('permissions:', j['permissions']\\); print\\('checkout:', j['steps'][0]['uses']\\); print\\('gate inputs:', list\\(j['steps'][1]['with'].keys\\(\\)\\)\\)\")",
-      "Bash(git check-ignore *)"
+      "Bash(git check-ignore *)",
+      "Bash(python tests/test_harness.py -v)",
+      "Bash(python tests/test_harness.py)",
+      "Bash(python tests/test_scan.py)"
     ]
   }
 }
