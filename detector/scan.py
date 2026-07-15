@@ -29,12 +29,18 @@ Usage:
   python3 detector/scan.py --git-base origin/main                # CI: diff vs base
   python3 detector/scan.py --diff x.diff --verbose               # timing on stderr
 
+Large diffs (big pushes, repo init) are split on file boundaries into chunks
+that each fit the per-call budget, scanned in priority order (high-risk files
+first) up to MAX_CHUNKS calls, and aggregated into ONE verdict — replacing the
+old truncate-and-floor behaviour.
+
 Env (defaults shown):
   OLLAMA_URL http://localhost:11434 | MODEL qwen2.5-coder:3b
   PROMPT_FILE prompts/intent.md | COMMENT_FILE comment.md
   BLOCK_THRESHOLD 70 | REVIEW_THRESHOLD 40 | MAX_CHARS 16000 | NUM_CTX 4096
   NUM_PREDICT 512 | FAIL_SAFE review | REQUEST_TIMEOUT 600 | RETRY_BACKOFF 2
   RETRIES 3 | INJECTION_FLOOR 55 | FAIL_CLOSED false
+  MAX_CHARS is the PER-CHUNK budget | MAX_CHUNKS 8 | REDUCE concat
 """
 
 import argparse
@@ -54,12 +60,28 @@ PROMPT_FILE = os.environ.get("PROMPT_FILE", "prompts/intent.md")
 COMMENT_FILE = os.environ.get("COMMENT_FILE", "comment.md")
 BLOCK = int(os.environ.get("BLOCK_THRESHOLD", "70"))
 REVIEW = int(os.environ.get("REVIEW_THRESHOLD", "40"))
+# PER-CHUNK character budget: the most diff chars sent to the model in ONE call.
+# A large diff is split on file boundaries and packed into chunks under this
+# budget (see pack()), so this must be sized by the SAME fit math the single
+# call always relied on: NUM_CTX budget - system prompt - NUM_PREDICT output
+# headroom. NB: the 16000 default (~4000 tok) plus the ~1.5k-tok system prompt
+# and 512 output tokens (~6k tok) OVERFLOWS the default NUM_CTX=4096 — Ollama
+# would silently clip it. Raise NUM_CTX (and the action's warm-up num_ctx to
+# match) for the full budget; the default is kept for backward compatibility.
 MAX_CHARS = int(os.environ.get("MAX_CHARS", "16000"))
+# Hard cap on model calls per scan: bounds total wall-clock (each chunk is one
+# bounded warm call under REQUEST_TIMEOUT). Files that don't fit within this many
+# chunks are left unscanned and floor the verdict to review.
+MAX_CHUNKS = max(1, int(os.environ.get("MAX_CHUNKS", "8")))
+# Reduce strategy for combining chunk results: "concat" = deterministic merge
+# (default); "llm" = one extra, presentation-only model call that rewrites the
+# reasoning narrative (never the score/findings/verdict).
+REDUCE = os.environ.get("REDUCE", "concat").lower()
 # Ollama's context window. Its default (2048 tokens) is smaller than MAX_CHARS,
 # so without this the prompt is SILENTLY truncated by Ollama before the model
-# sees it. Sized to hold the system prompt + a MAX_CHARS diff (~4000 tokens) +
-# output headroom. Bigger = more RAM/slower on the runner; the action warms the
-# model with this SAME value so the timed scan call reuses the loaded model.
+# sees it. Sized to hold the system prompt + a per-chunk diff + output headroom.
+# Bigger = more RAM/slower on the runner; the action warms the model with this
+# SAME value so the timed scan call reuses the loaded model.
 NUM_CTX = int(os.environ.get("NUM_CTX", "4096"))
 # Hard ceiling on generated tokens. Without it, under constrained JSON decoding
 # a small model can run away generating until it hits the context limit, blowing
@@ -92,6 +114,47 @@ INJECTION = re.compile(
     r"|pre-?approved|reviewer[-\s]?bot|system\s*:)",
     re.IGNORECASE,
 )
+
+# File-aware chunking priorities: when a diff is too big to scan in one budget,
+# these decide which files the model sees FIRST (and which get dropped last).
+# High-risk PATHS — CI/CD, container, package-manifest, and shell files are the
+# usual vectors for exfiltration / release tampering, so they scan first.
+HIGH_RISK_PATH = re.compile(
+    r"(\.github/workflows/"
+    r"|(^|/)Dockerfile"
+    r"|\.sh$"
+    r"|(^|/)package\.json$"
+    r"|(^|/)requirements\.txt$"
+    r"|(^|/)go\.mod$"
+    r"|\.ya?ml$)",
+    re.IGNORECASE,
+)
+# Signal KEYWORDS in a file's diff — code that evaluates, spawns, decodes, or
+# reaches the network / handles secrets. Each distinct hit nudges priority up.
+SIGNAL_KEYWORDS = re.compile(
+    r"(eval|exec|base64|subprocess|os\.system|urllib|requests"
+    r"|socket|token|secret|password|curl)",
+    re.IGNORECASE,
+)
+
+# System prompt for the optional REDUCE="llm" pass. PRESENTATION-ONLY: it merges
+# the per-chunk narratives into one, and must not invent findings or change the
+# score — the score/findings/verdict are fixed by the deterministic aggregation.
+REDUCE_SYSTEM = (
+    "You are a security-review editor. You are given the suspicious findings and "
+    "the per-chunk reasoning notes from a diff that was scanned in several parts. "
+    "Merge them into ONE coherent 'why this score' narrative. Do NOT add new "
+    "findings, do NOT compute or mention a score, and do NOT contradict the "
+    "findings — only summarise the reasoning you are given. Return STRICT JSON: "
+    '{"reasoning": "<merged narrative>"}'
+)
+
+# Small schema for the reduce pass — just the rewritten reasoning string.
+REDUCE_SCHEMA = {
+    "type": "object",
+    "properties": {"reasoning": {"type": "string"}},
+    "required": ["reasoning"],
+}
 
 # JSON schema handed to Ollama's structured-output "format" — constrains the
 # model to emit exactly this shape. Ollama emits properties in declaration
@@ -206,6 +269,79 @@ def extract_hunks(diff):
     return "".join(out)
 
 
+_DIFF_GIT = re.compile(r'^diff --git a/(.*?) b/(.*?)\s*$', re.MULTILINE)
+
+
+def split_by_file(hunks):
+    """Split cleaned hunks into per-file diffs on `diff --git` boundaries.
+
+    Returns a list of (path, file_diff), one entry per file, with each file's
+    hunks kept WHOLE (a file's diff is never split across entries). `path` is
+    taken from the `b/` side of the `diff --git a/… b/…` header, falling back to
+    the `a/` side or "unknown". Any text before the first `diff --git` header
+    (shouldn't occur after extract_hunks) is ignored.
+    """
+    files = []
+    matches = list(_DIFF_GIT.finditer(hunks))
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(hunks)
+        path = m.group(2) or m.group(1) or "unknown"
+        files.append((path, hunks[start:end]))
+    return files
+
+
+def priority(path, file_diff):
+    """Higher = scan first. High-risk paths and signal-keyword hits raise it, so
+    the files most likely to carry an attack are the last to be dropped when a
+    diff exceeds the chunk budget."""
+    score = 0
+    if HIGH_RISK_PATH.search(path):
+        score += 100
+    # Count DISTINCT signal keywords present, so one file mentioning many
+    # different risky APIs ranks above one repeating a single keyword.
+    score += 10 * len({m.group(0).lower() for m in SIGNAL_KEYWORDS.finditer(file_diff)})
+    return score
+
+
+def pack(files, budget, max_chunks):
+    """Greedy-pack whole files into at most `max_chunks` chunks under `budget`
+    chars each, scanning the highest-priority files first.
+
+    Returns (chunks, overflow_files, truncated_files):
+      - chunks: list of (chunk_text, [paths]) to send to the model.
+      - truncated_files: paths of single files larger than `budget`; each gets
+        its own chunk truncated to `budget` with a "[file truncated]" marker.
+      - overflow_files: paths that could not be placed once max_chunks chunks
+        exist (left UNSCANNED — the caller floors the verdict to review).
+    """
+    ranked = sorted(files, key=lambda f: priority(f[0], f[1]), reverse=True)
+    chunks = []                                 # list of [text, [paths]]
+    overflow_files = []
+    truncated_files = []
+    for path, fdiff in ranked:
+        if len(fdiff) > budget:                 # oversize single file -> own chunk
+            if len(chunks) < max_chunks:
+                chunks.append([fdiff[:budget] + "\n[file truncated]", [path]])
+                truncated_files.append(path)
+            else:
+                overflow_files.append(path)
+            continue
+        placed = False
+        for chunk in chunks:                    # first-fit into an existing chunk
+            if len(chunk[0]) + len(fdiff) <= budget:
+                chunk[0] += fdiff
+                chunk[1].append(path)
+                placed = True
+                break
+        if not placed:
+            if len(chunks) < max_chunks:
+                chunks.append([fdiff, [path]])
+            else:
+                overflow_files.append(path)
+    return [(text, paths) for text, paths in chunks], overflow_files, truncated_files
+
+
 def call_model(system, user, schema):
     payload = {
         "model": MODEL,
@@ -265,8 +401,9 @@ def coerce_result(raw):
     }
 
 
-def review_diff(hunks, system):
-    """One model call over the whole diff, wrapped as untrusted data. Retries
+def review_chunk(hunks, system):
+    """One model call over a single chunk of the diff, wrapped as untrusted data.
+    Retries
     transient failures with exponential backoff before giving up. Returns the
     parsed result, or raises InfraError / ContentError so the caller can apply
     the right fail-safe policy for each failure kind.
@@ -295,6 +432,93 @@ def review_diff(hunks, system):
     raise exc if kind == "content" else InfraError(str(exc))
 
 
+def aggregate_results(outcomes, files_scanned, num_chunks):
+    """Combine the successful per-chunk results into ONE result (deterministic
+    "concat" reduce). Returns (result, notable_reasonings):
+
+      - risk_score: max over successful chunks (0 if none succeeded) — the score
+        reflects the WORST chunk, never an average.
+      - suspicious_findings: union, deduped on (file, reason.strip().lower()).
+      - key_changes: union, deduped on the stripped string.
+      - reasoning: only the reasoning from chunks that produced a finding OR
+        scored >= REVIEW, each prefixed with that chunk's files; if none are
+        notable, a single "No notable findings…" line.
+
+    notable_reasonings (the same prefixed strings) is returned for the optional
+    LLM reduce pass. A failed chunk contributes nothing here; the caller applies
+    the cross-chunk fail-safe separately.
+    """
+    successful = [o for o in outcomes if o["status"] == "ok"]
+    risk_score = max((o["result"]["risk_score"] for o in successful), default=0)
+
+    findings, seen_f = [], set()
+    for o in successful:
+        for f in o["result"]["suspicious_findings"]:
+            key = (f["file"], f["reason"].strip().lower())
+            if key not in seen_f:
+                seen_f.add(key)
+                findings.append(f)
+
+    key_changes, seen_k = [], set()
+    for o in successful:
+        for c in o["result"]["key_changes"]:
+            k = c.strip()
+            if k and k not in seen_k:
+                seen_k.add(k)
+                key_changes.append(c)
+
+    notable = []
+    for o in successful:
+        r = o["result"]
+        if (r["suspicious_findings"] or r["risk_score"] >= REVIEW) and r["reasoning"]:
+            notable.append(f"[{', '.join(o['paths'])}] {r['reasoning']}")
+    reasoning = ("\n\n".join(notable) if notable
+                 else f"No notable findings across {files_scanned} files "
+                      f"/ {num_chunks} chunks.")
+
+    result = {
+        "risk_score": risk_score,
+        "key_changes": key_changes,
+        "suspicious_findings": findings,
+        "reasoning": reasoning,
+    }
+    return result, notable
+
+
+def reduce_llm(result, notable_reasonings):
+    """Optional REDUCE="llm" pass: one extra, PRESENTATION-ONLY model call that
+    rewrites the merged reasoning into a single coherent narrative.
+
+    Returns the new reasoning string, or None on any failure (InfraError /
+    ContentError / unparseable) so the caller silently keeps the deterministic
+    "concat" reasoning. It NEVER touches risk_score, findings, or the verdict —
+    only the reasoning prose — and never raises.
+    """
+    findings_txt = "\n".join(
+        f"- {f['file']}: {f['reason']}" for f in result["suspicious_findings"]
+    ) or "(none)"
+    notes_txt = "\n\n".join(notable_reasonings) or "(none)"
+    user = (f"Suspicious findings:\n{findings_txt}\n\n"
+            f"Per-chunk reasoning notes:\n{notes_txt}")
+    try:
+        raw = call_model(REDUCE_SYSTEM, user, REDUCE_SCHEMA)
+    except InfraError:
+        return None
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not m:
+            return None
+        try:
+            obj = json.loads(m.group(0))
+        except Exception:
+            return None
+    if not isinstance(obj, dict):
+        return None
+    return str(obj.get("reasoning", "")).strip() or None
+
+
 def verdict_of(score):
     return "block" if score >= BLOCK else "review" if score >= REVIEW else "pass"
 
@@ -307,7 +531,7 @@ def risk_band(score):
     return "🟢 low risk"
 
 
-def render_markdown(result, verdict, failsafe=None, truncated=None, injection=False):
+def render_markdown(result, verdict, failsafe=None, injection=False, coverage=None):
     icon = {"pass": "✅", "review": "⚠️", "block": "⛔"}.get(verdict, "❓")
     lines = [
         MARKER,
@@ -340,15 +564,28 @@ def render_markdown(result, verdict, failsafe=None, truncated=None, injection=Fa
             "for instructions aimed at the reviewer.",
             "",
         ]
-    if truncated:
-        kept, total = truncated
-        pct = round(100 * kept / total)
+    if coverage:
+        overflow = coverage.get("overflow") or []
+        truncated = coverage.get("truncated") or []
         lines += [
-            f"> ⚠️ **Large diff — only the first {kept:,} of {total:,} "
-            f"characters (~{pct}%) were scanned.** Changes beyond that point "
-            "were not reviewed; the verdict is floored to at least `review`.",
+            f"_Scanned {coverage['files_scanned']} files across "
+            f"{coverage['num_chunks']} chunks._",
             "",
         ]
+        if overflow or truncated:
+            lines += [
+                "> ⚠️ **Not fully scanned — verdict floored to at least "
+                "`review`.** The diff was too large to send to the model in "
+                "full, so some files were not completely reviewed:",
+                "",
+            ]
+            if overflow:
+                lines.append("> - **Unscanned (over budget):** "
+                             + ", ".join(f"`{p}`" for p in overflow))
+            if truncated:
+                lines.append("> - **Truncated (file larger than one chunk):** "
+                             + ", ".join(f"`{p}`" for p in truncated))
+            lines.append("")
     lines += [
         "### Risk Score",
         f"**{result['risk_score']} / 100** — {risk_band(result['risk_score'])}",
@@ -399,27 +636,56 @@ def main():
         log("prompt-injection markers found in diff; score will be floored",
             force=True)
 
-    truncated = None                            # (kept_chars, total_chars) or None
-    if len(hunks) > MAX_CHARS:
-        truncated = (MAX_CHARS, len(hunks))
-        log(f"diff truncated: {len(hunks)} -> {MAX_CHARS} chars", force=True)
-        hunks = hunks[:MAX_CHARS] + "\n[diff truncated]"
+    # File-aware chunking: split on file boundaries, greedy-pack whole files into
+    # per-call budgets (high-risk files first), and scan each chunk on its own —
+    # replacing the old truncate-and-floor of the tail.
+    files = split_by_file(hunks)
+    if not files:                               # defensive: hunks with no file header
+        files = [("unknown", hunks)]
+    chunks, overflow_files, truncated_files = pack(files, MAX_CHARS, MAX_CHUNKS)
+    files_scanned = sum(len(paths) for _text, paths in chunks)
+    num_chunks = len(chunks)
+    log(f"model={MODEL} files={len(files)} chunks={num_chunks} "
+        f"scanned={files_scanned} overflow={len(overflow_files)} "
+        f"truncated={len(truncated_files)}")
 
-    log(f"model={MODEL} diff_chars={len(hunks)}")
+    outcomes = []                               # per-chunk: status/result/paths
+    for i, (text, paths) in enumerate(chunks):
+        log(f"chunk {i + 1}/{num_chunks} files={len(paths)} chars={len(text)}")
+        try:
+            res = review_chunk(text, system)
+        except InfraError as exc:
+            outcomes.append({"status": "infra", "result": None, "paths": paths})
+            # Loud, machine-parseable line so the workflow can route to Slack/alerts.
+            log(f"FAILSAFE kind=infra chunk={i + 1} fail_closed={FAIL_CLOSED} "
+                f"detail={exc}", force=True)
+        except ContentError as exc:
+            outcomes.append({"status": "content", "result": None, "paths": paths})
+            log(f"FAILSAFE kind=content chunk={i + 1} fail_closed={FAIL_CLOSED} "
+                f"detail={exc}", force=True)
+        else:
+            outcomes.append({"status": "ok", "result": res, "paths": paths})
+
+    # Reduce: one successful chunk is used verbatim (its result IS the final
+    # result); otherwise merge deterministically, optionally rewriting the
+    # reasoning prose via the presentation-only LLM pass.
+    successful = [o for o in outcomes if o["status"] == "ok"]
+    if num_chunks == 1 and len(successful) == 1:
+        result = successful[0]["result"]
+    else:
+        result, notable = aggregate_results(outcomes, files_scanned, num_chunks)
+        if REDUCE == "llm" and notable:
+            merged = reduce_llm(result, notable)
+            if merged:                          # None -> silently keep concat prose
+                result["reasoning"] = merged
+
+    # Cross-chunk fail-safe (infra beats content). Successfully-scanned chunks
+    # still contribute findings and can raise the score even when one failed.
     failsafe = None                             # None | "infra" | "content"
-    try:
-        result = review_diff(hunks, system)
-    except InfraError as exc:
+    if any(o["status"] == "infra" for o in outcomes):
         failsafe = "infra"
-        result = {"risk_score": 0, "key_changes": [],
-                  "suspicious_findings": [], "reasoning": ""}
-        # Loud, machine-parseable line so the workflow can route to Slack/alerts.
-        log(f"FAILSAFE kind=infra fail_closed={FAIL_CLOSED} detail={exc}", force=True)
-    except ContentError as exc:
+    elif any(o["status"] == "content" for o in outcomes):
         failsafe = "content"
-        result = {"risk_score": 0, "key_changes": [],
-                  "suspicious_findings": [], "reasoning": ""}
-        log(f"FAILSAFE kind=content fail_closed={FAIL_CLOSED} detail={exc}", force=True)
 
     if injection:                               # floor regardless of the model's score
         apply_injection_floor(result, INJECTION_FLOOR)
@@ -431,17 +697,23 @@ def main():
         verdict = escalate(verdict, "block" if FAIL_CLOSED else FAIL_SAFE)
     elif failsafe == "content":                 # parser broke on the diff -> distrust it
         verdict = escalate(verdict, "block" if FAIL_CLOSED else "review")
-    if truncated:                               # partially scanned -> never a clean pass
+    if overflow_files or truncated_files:       # partially scanned -> never a clean pass
         verdict = escalate(verdict, "review")
 
+    coverage = {"files_scanned": files_scanned, "num_chunks": num_chunks,
+                "overflow": overflow_files, "truncated": truncated_files}
+
     print(json.dumps({"verdict": verdict, "score": result["risk_score"],
-                      "truncated": bool(truncated), "injection": injection,
-                      "failsafe": failsafe,
+                      "truncated": bool(truncated_files or overflow_files),
+                      "injection": injection, "failsafe": failsafe,
+                      "num_chunks": num_chunks, "files_scanned": files_scanned,
+                      "files_unscanned": overflow_files,
+                      "files_truncated": truncated_files,
                       "key_changes": result["key_changes"],
                       "suspicious_findings": result["suspicious_findings"],
                       "reasoning": result["reasoning"]}, indent=2))
 
-    comment = render_markdown(result, verdict, failsafe, truncated, injection)
+    comment = render_markdown(result, verdict, failsafe, injection, coverage)
     with open(COMMENT_FILE, "w", encoding="utf-8") as fh:
         fh.write(comment)
     log(f"wrote {COMMENT_FILE}")
