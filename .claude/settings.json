@@ -9,7 +9,13 @@
       "Bash(MAX_CHARS=200 MAX_CHUNKS=3 OLLAMA_URL=http://localhost:1 RETRIES=1 REQUEST_TIMEOUT=2 python detector/scan.py --diff C:/Users/yeesi/AppData/Local/Temp/claude/c--Github-llm-PR-reviewer-llm-PR-reviewer/d67fa049-db95-4b34-a8a1-1128db8d97c6/scratchpad/multi.diff --verbose)",
       "Bash(echo \"exit=$?\")",
       "Bash(curl -sf http://localhost:11434/api/tags)",
-      "Bash(PYTHONUTF8=1 python detector/scan.py --diff samples/malicious/multi_file_attack.diff --verbose)"
+      "Bash(PYTHONUTF8=1 python detector/scan.py --diff samples/malicious/multi_file_attack.diff --verbose)",
+      "Bash(python -c \"import importlib.util,os;s=importlib.util.spec_from_file_location\\('scan','detector/scan.py'\\);m=importlib.util.module_from_spec\\(s\\);s.loader.exec_module\\(m\\);d=open\\('tests/fixtures/large_chunked.diff',encoding='utf-8'\\).read\\(\\);h=m.extract_hunks\\(d\\);files=m.split_by_file\\(h\\);c,o,t=m.pack\\(files,m.MAX_CHARS,m.MAX_CHUNKS\\);print\\('files parsed:',[p for p,_ in files]\\);print\\('MAX_CHARS',m.MAX_CHARS,'MAX_CHUNKS',m.MAX_CHUNKS\\);print\\('chunks',len\\(c\\),'| per-chunk paths:',[paths for _,paths in c]\\);print\\('overflow',o\\);print\\('truncated',t\\)\")",
+      "Bash(python -c \"import importlib.util;s=importlib.util.spec_from_file_location\\('scan','detector/scan.py'\\);m=importlib.util.module_from_spec\\(s\\);s.loader.exec_module\\(m\\);d=open\\('tests/fixtures/large_chunked.diff',encoding='utf-8'\\).read\\(\\);print\\('injection markers present:', bool\\(m.INJECTION.search\\(d\\)\\)\\);print\\('signal keywords \\(eval/exec/base64/...\\):', sorted\\({x.group\\(0\\).lower\\(\\) for x in m.SIGNAL_KEYWORDS.finditer\\(d\\)}\\)\\);import re;big=[fd for p,fd in m.split_by_file\\(m.extract_hunks\\(d\\)\\) if p=='app/big_module.py'][0];print\\('big_module chars:', len\\(big\\), '> MAX_CHARS' if len\\(big\\)>m.MAX_CHARS else '<= MAX_CHARS'\\)\")",
+      "Bash(python -c \"import yaml,json; d=yaml.safe_load\\(open\\('action.yml',encoding='utf-8'\\)\\); i=d['inputs']; print\\('inputs:', list\\(i.keys\\(\\)\\)\\); print\\('num-ctx default:', i['num-ctx']['default']\\); print\\('max-chars default:', i['max-chars']['default']\\); print\\('max-chunks default:', i['max-chunks']['default']\\); env=d['runs']['steps'][1]['env']; print\\('run-step env keys:', list\\(env.keys\\(\\)\\)\\)\")",
+      "Bash(python -c \"import ast,re; print\\('yaml module missing; doing basic check'\\)\")",
+      "Bash(python -c \"import yaml; d=yaml.safe_load\\(open\\('.github/workflows/gate.yml',encoding='utf-8'\\)\\); j=d['jobs']['scan']; print\\('permissions:', j['permissions']\\); print\\('checkout:', j['steps'][0]['uses']\\); print\\('gate inputs:', list\\(j['steps'][1]['with'].keys\\(\\)\\)\\)\")",
+      "Bash(git check-ignore *)"
     ]
   }
 }
