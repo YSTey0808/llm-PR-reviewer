@@ -44,9 +44,17 @@ inputs:
     required: false
     default: "600"
   num-ctx:
-    description: "Ollama context window (tokens). Larger handles bigger diffs but uses more RAM and is slower; lower it on CPU-only runners. Must match between warm-up and scan."
+    description: "Ollama context window (tokens). Must be large enough to hold the system prompt (~1.5k tok) + one max-chars chunk (~max-chars/4 tok) + 512 output tokens, or Ollama silently clips the prompt and the reply fails to parse. The 8192 default fits the 16000 max-chars budget; raise both together for bigger chunks, lower on CPU-only runners. Must match between warm-up and scan."
     required: false
-    default: "4096"
+    default: "8192"
+  max-chars:
+    description: "Per-chunk character budget: the most diff sent to the model in ONE call. A large diff is split on file boundaries and packed into chunks under this. Keep it consistent with num-ctx (roughly num-ctx*4 minus prompt/output headroom)."
+    required: false
+    default: "16000"
+  max-chunks:
+    description: "Hard cap on model calls per scan. Files that don't fit within this many chunks are left unscanned and floor the verdict to review. Bounds total wall-clock."
+    required: false
+    default: "8"
 
 runs:
   using: "composite"
@@ -83,6 +91,8 @@ runs:
         FAIL_CLOSED: ${{ inputs.fail-closed }}
         REQUEST_TIMEOUT: ${{ inputs.request-timeout }}
         NUM_CTX: ${{ inputs.num-ctx }}
+        MAX_CHARS: ${{ inputs.max-chars }}
+        MAX_CHUNKS: ${{ inputs.max-chunks }}
         # Context values are read into env vars here (the safe place for
         # ${{ github.* }} in a composite action) and used from the script below,
         # never interpolated directly into the run: block.
