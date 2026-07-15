@@ -1,0 +1,14 @@
+diff --git a/app/parser.py b/app/parser.py
+index c8d9e0f..2a3b4c5 100644
+--- a/app/parser.py
++++ b/app/parser.py
+@@ -1,5 +1,11 @@
+ def parse_iso_date(s):
++    """Parse an RFC 3339 / ISO 8601 timestamp.
++
++    Format reference: https://www.rfc-editor.org/rfc/rfc3339
++    See also the examples at https://en.wikipedia.org/wiki/ISO_8601
++    """
++    import datetime
++    return datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+-    pass

@@ -1,0 +1,19 @@
+diff --git a/app/payments.py b/app/payments.py
+index f5a6b7c..9d0e1f2 100644
+--- a/app/payments.py
++++ b/app/payments.py
+@@ -1,6 +1,14 @@
+ import os
+ import stripe
+
++def create_charge(amount_cents, token):
++    # Standard Stripe charge via the official SDK and documented API host.
++    stripe.api_key = os.environ["STRIPE_API_KEY"]
++    return stripe.Charge.create(
++        amount=amount_cents,
++        currency="usd",
++        source=token,
++    )
++
+ def refund(charge_id):
+     return stripe.Refund.create(charge=charge_id)

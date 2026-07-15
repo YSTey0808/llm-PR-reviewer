@@ -1,0 +1,19 @@
+diff --git a/app/cart.py b/app/cart.py
+index d9e0f1a..3b4c5d6 100644
+--- a/app/cart.py
++++ b/app/cart.py
+@@ -1,10 +1,10 @@
+-def calc(items):
+-    t = 0
+-    for i in items:
+-        t += i.price * i.qty
+-    return t
++def calculate_subtotal(items):
++    subtotal = 0
++    for item in items:
++        subtotal += item.price * item.qty
++    return subtotal
+
+ def checkout(items):
+-    return calc(items)
++    return calculate_subtotal(items)

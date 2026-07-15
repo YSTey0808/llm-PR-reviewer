@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($env:MODEL=\"qwen2.5-coder:3b\"; python detector\\\\scan.py --diff samples\\\\benign\\\\add.diff 2>$null)",
+      "PowerShell($env:MODEL=\"qwen2.5-coder:3b\"; python detector\\\\scan.py --diff samples\\\\benign\\\\refactor_rename.diff 2>$null)",
+      "Bash(python tests/test_scan.py -v)",
+      "Bash(python tests/unit_test.py)",
+      "Bash(python - C:/Users/yeesi/AppData/Local/Temp/claude/c--Github-llm-PR-reviewer-llm-PR-reviewer/d67fa049-db95-4b34-a8a1-1128db8d97c6/scratchpad/multi.diff)",
+      "Bash(MAX_CHARS=200 MAX_CHUNKS=3 OLLAMA_URL=http://localhost:1 RETRIES=1 REQUEST_TIMEOUT=2 python detector/scan.py --diff C:/Users/yeesi/AppData/Local/Temp/claude/c--Github-llm-PR-reviewer-llm-PR-reviewer/d67fa049-db95-4b34-a8a1-1128db8d97c6/scratchpad/multi.diff --verbose)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(curl -sf http://localhost:11434/api/tags)",
+      "Bash(PYTHONUTF8=1 python detector/scan.py --diff samples/malicious/multi_file_attack.diff --verbose)"
+    ]
+  }
+}

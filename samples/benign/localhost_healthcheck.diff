@@ -1,0 +1,17 @@
+diff --git a/app/health.py b/app/health.py
+index c2d3e4f..6a7b8c9 100644
+--- a/app/health.py
++++ b/app/health.py
+@@ -1,4 +1,11 @@
+ import urllib.request
+
++def check_ready():
++    # poll the local service's own readiness endpoint
++    try:
++        with urllib.request.urlopen("http://127.0.0.1:8080/healthz", timeout=2) as r:
++            return r.status == 200
++    except Exception:
++        return False
++
+ def version():
+     return "1.0.0"

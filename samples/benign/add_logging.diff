@@ -1,0 +1,15 @@
+diff --git a/app/orders.py b/app/orders.py
+index b7c8d9e..1f2a3b4 100644
+--- a/app/orders.py
++++ b/app/orders.py
+@@ -1,7 +1,12 @@
++import logging
++
++logger = logging.getLogger(__name__)
++
+ def place_order(user, items):
+     total = sum(i.price for i in items)
++    logger.info("order placed user=%s items=%d total=%.2f", user.id, len(items), total)
+     order = save_order(user, items, total)
++    logger.debug("order persisted id=%s", order.id)
+     return order

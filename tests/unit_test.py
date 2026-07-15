@@ -94,6 +94,51 @@ _mixed = json.dumps({
 })
 check("coerce drops non-dict findings", len(scan.coerce_result(_mixed)["suspicious_findings"]) == 2)
 
+# ---- split_by_file: whole-file integrity, b/ path -----------------------
+_multi = (
+    "diff --git a/app.py b/app.py\n"
+    "--- a/app.py\n+++ b/app.py\n@@ -0,0 +1,2 @@\n+import os\n+print(os.getcwd())\n"
+    "diff --git a/data.csv b/data.csv\n"
+    "--- a/data.csv\n+++ b/data.csv\n@@ -0,0 +1 @@\n+1,2,3\n"
+)
+_files = scan.split_by_file(_multi)
+check("split_by_file splits per file", [p for p, _ in _files] == ["app.py", "data.csv"])
+check("split_by_file keeps file whole", "data.csv" not in dict(_files)["app.py"])
+check("split_by_file keeps added lines", "+print(os.getcwd())" in dict(_files)["app.py"])
+
+# ---- priority: high-risk paths / signals rank above data files ----------
+check("priority high-risk path > data file",
+      scan.priority(".github/workflows/ci.yml", "+name: CI\n") > scan.priority("data.csv", "+1,2,3\n"))
+check("priority signal keyword raises score",
+      scan.priority("u.py", "+import subprocess\n+subprocess.run(x)\n") > scan.priority("u.py", "+return a + b\n"))
+
+
+def _pf(path, body):
+    return (path, f"diff --git a/{path} b/{path}\n{body}")
+
+
+# ---- pack: budget respected --------------------------------------------
+_pk_files = [_pf(f"f{i}.txt", "+" + "x" * 50 + "\n") for i in range(4)]
+_pk_chunks, _pk_over, _pk_trunc = scan.pack(_pk_files, 120, 8)
+check("pack budget respected", all(len(t) <= 120 for t, _ in _pk_chunks))
+check("pack no overflow when it fits", _pk_over == [] and _pk_trunc == [])
+
+# ---- pack: oversize single file truncated -------------------------------
+_os_chunks, _os_over, _os_trunc = scan.pack([_pf("big.py", "+" + "y" * 500 + "\n")], 100, 8)
+check("pack truncates oversize file", len(_os_chunks) == 1 and "[file truncated]" in _os_chunks[0][0])
+check("pack records truncated file", _os_trunc == ["big.py"])
+
+# ---- pack: overflow past max_chunks drops lowest priority ---------------
+_ov_files = [
+    _pf(".github/workflows/ci.yml", "+name: CI\n"),
+    _pf("a.txt", "+" + "a" * 60 + "\n"),
+    _pf("b.txt", "+" + "b" * 60 + "\n"),
+]
+_ov_chunks, _ov_over, _ov_trunc = scan.pack(_ov_files, 100, 1)
+_ov_scanned = [p for _, ps in _ov_chunks for p in ps]
+check("pack keeps high-risk file", ".github/workflows/ci.yml" in _ov_scanned)
+check("pack overflows low-risk files", ".github/workflows/ci.yml" not in _ov_over and bool(_ov_over))
+
 print()
 if _FAILS:
     print(f"{len(_FAILS)} FAILED: {_FAILS}")

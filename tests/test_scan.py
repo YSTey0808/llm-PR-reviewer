@@ -42,6 +42,77 @@ class TestExtractHunks(unittest.TestCase):
         self.assertNotIn("index e69de29", out)
 
 
+class TestSplitByFile(unittest.TestCase):
+    DIFF = (
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -0,0 +1,2 @@\n"
+        "+import os\n"
+        "+print(os.getcwd())\n"
+        "diff --git a/data.csv b/data.csv\n"
+        "--- a/data.csv\n"
+        "+++ b/data.csv\n"
+        "@@ -0,0 +1 @@\n"
+        "+1,2,3\n"
+    )
+
+    def test_splits_on_file_boundaries_using_b_path(self):
+        files = scan.split_by_file(self.DIFF)
+        self.assertEqual([p for p, _ in files], ["app.py", "data.csv"])
+
+    def test_keeps_each_file_whole(self):
+        files = dict(scan.split_by_file(self.DIFF))
+        self.assertIn("+print(os.getcwd())", files["app.py"])
+        self.assertNotIn("data.csv", files["app.py"])   # no bleed past boundary
+        self.assertIn("+1,2,3", files["data.csv"])
+
+
+class TestPriority(unittest.TestCase):
+    def test_high_risk_path_outranks_data_file(self):
+        hi = scan.priority(".github/workflows/ci.yml", "+name: CI\n")
+        lo = scan.priority("data.csv", "+1,2,3\n")
+        self.assertGreater(hi, lo)
+
+    def test_signal_keywords_raise_priority(self):
+        risky = scan.priority("util.py", "+import subprocess\n+subprocess.run(x)\n")
+        plain = scan.priority("util.py", "+return a + b\n")
+        self.assertGreater(risky, plain)
+
+
+class TestPack(unittest.TestCase):
+    @staticmethod
+    def _file(path, body):
+        return (path, f"diff --git a/{path} b/{path}\n{body}")
+
+    def test_budget_respected_across_chunks(self):
+        files = [self._file(f"f{i}.txt", "+" + "x" * 50 + "\n") for i in range(4)]
+        chunks, overflow, truncated = scan.pack(files, 120, 8)
+        self.assertTrue(all(len(text) <= 120 for text, _ in chunks))
+        self.assertEqual((overflow, truncated), ([], []))
+
+    def test_oversize_single_file_truncated(self):
+        big = self._file("big.py", "+" + "y" * 500 + "\n")
+        chunks, overflow, truncated = scan.pack([big], 100, 8)
+        self.assertEqual(len(chunks), 1)
+        self.assertIn("[file truncated]", chunks[0][0])
+        self.assertEqual(truncated, ["big.py"])
+        self.assertEqual(overflow, [])
+
+    def test_overflow_past_max_chunks_drops_lowest_priority(self):
+        files = [
+            self._file(".github/workflows/ci.yml", "+name: CI\n"),
+            self._file("a.txt", "+" + "a" * 60 + "\n"),
+            self._file("b.txt", "+" + "b" * 60 + "\n"),
+        ]
+        chunks, overflow, truncated = scan.pack(files, 100, 1)
+        scanned = [p for _, paths in chunks for p in paths]
+        self.assertIn(".github/workflows/ci.yml", scanned)   # high-risk kept
+        self.assertNotIn(".github/workflows/ci.yml", overflow)
+        self.assertTrue(overflow)                            # low-risk dropped
+        self.assertEqual(truncated, [])
+
+
 class TestCoerceResult(unittest.TestCase):
     def test_valid_json_has_four_fields_no_summary(self):
         raw = ('{"key_changes": ["x"], "suspicious_findings": [],'
