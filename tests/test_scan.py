@@ -127,8 +127,11 @@ class TestCoerceResult(unittest.TestCase):
         self.assertEqual(scan.coerce_result('{"risk_score": -7}')["risk_score"], 0)
 
     def test_findings_filtered_and_reason_truncated(self):
-        raw = ('{"suspicious_findings": [{"file": "a.py", "reason": "'
-               + "x" * 500 + '"}, "not-a-dict"]}')
+        # risk_score present so the reply parses (a missing score now -> None,
+        # see test_missing_or_non_int_score_returns_none); this checks findings
+        # filtering + reason truncation.
+        raw = ('{"risk_score": 30, "suspicious_findings": [{"file": "a.py", '
+               '"reason": "' + "x" * 500 + '"}, "not-a-dict"]}')
         findings = scan.coerce_result(raw)["suspicious_findings"]
         self.assertEqual(len(findings), 1)
         self.assertEqual(len(findings[0]["reason"]), 400)
@@ -136,6 +139,13 @@ class TestCoerceResult(unittest.TestCase):
     def test_non_dict_and_garbage_return_none(self):
         self.assertIsNone(scan.coerce_result("[1, 2, 3]"))
         self.assertIsNone(scan.coerce_result("totally not json"))
+
+    def test_missing_or_non_int_score_returns_none(self):
+        # A reply with no usable risk_score is distrusted (-> ContentError),
+        # never rewarded with a default 0 that reads as a clean pass.
+        self.assertIsNone(scan.coerce_result('{"reasoning": "looks fine"}'))
+        self.assertIsNone(scan.coerce_result('{"risk_score": "high"}'))
+        self.assertIsNone(scan.coerce_result('{"risk_score": null}'))
 
 
 class TestVerdicts(unittest.TestCase):

@@ -19,7 +19,7 @@ Lines starting with `+` are the change under judgment. Context lines (no prefix)
 
 # Project context
 
-This is a general web / backend service. Behaviour that is out of character for ordinary application code is more suspicious. (Edit this line to describe YOUR real project — it materially improves accuracy.)
+This is a general web / backend service. Behaviour that is out of character for ordinary application code is more suspicious.
 
 # Malicious-intent categories to look for
 
@@ -38,10 +38,10 @@ This is a general web / backend service. Behaviour that is out of character for 
 - 40-69 unusual and worth a human glance, but a legitimate explanation is plausible
   (e.g. a new outbound call to a configurable but undocumented URL). This band
   means "a human should review", not "block".
-- 70-89 strong signs of intent; a reviewer would likely block (e.g. an auth check that
-  silently passes for one hardcoded username).
-- 90-100 unambiguous malicious behaviour (e.g. reading a private key and POSTing it out,
-  or decoding hidden bytes into exec).
+- 70-89 strong signs of intent; a reviewer would likely block (e.g. a request handler
+  that skips the permission check when a specific header value is present).
+- 90-100 unambiguous malicious behaviour (e.g. concatenating hidden hex bytes and
+  passing the result to the interpreter at runtime).
 ## Rules
 
 - If `suspicious_findings` is EMPTY, the change is benign: `risk_score` MUST be 0-39, and
@@ -52,10 +52,10 @@ This is a general web / backend service. Behaviour that is out of character for 
 - Calibration — when `suspicious_findings` is empty, map the reasoning to a LOW number, not 40.
   A network call is not suspicious by itself; score it low when the destination is local or
   documented. Anchor to these (use YOUR diff's own number near these, do not copy verbatim):
-  - health-check / request to `127.0.0.1` or `localhost`, no findings → about 5
-  - pure refactor / rename, logging, or a docstring URL, no findings → about 3
-  - reading env/config for settings without sending it out, no findings → about 8
-  - dependency/version bump, no findings → about 2
+  - incrementing a Prometheus/StatsD metric counter, no findings → about 4
+  - adding a struct field and its accessor method, no findings → about 3
+  - widening a numeric timeout constant, no findings → about 2
+  - reading a feature-flag value to pick a UI path (not sent anywhere) → about 8
 - When torn between two bands, pick the LOWER one — unless secrets/credentials are being
   sent out or hidden code reaches exec/eval, in which case pick the higher.
 - The overall score reflects the WORST behaviour in the diff, not an average.

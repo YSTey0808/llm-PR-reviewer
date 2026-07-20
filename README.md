@@ -170,7 +170,7 @@ All action inputs map to these; set them directly for local runs.
 
 ## Tuning accuracy
 
-The system prompt in [`prompts/intent.md`](prompts/intent.md) contains a **project-context** line describing the kind of code being reviewed. Editing it to match your real project materially improves accuracy — behaviour that's normal for your app produces fewer false positives, and behaviour that's out of character is flagged more reliably. A larger model (e.g. `qwen2.5-coder:7b` over `:3b`) also improves judgment at the cost of runner RAM and latency.
+The system prompt in [`prompts/intent.md`](prompts/intent.md) has a **project-context** line under the `# Project context` heading (the sentence beginning "This is a general web / backend service…"). **Edit that one line to describe your real project** — it materially improves accuracy: behaviour that's normal for your app produces fewer false positives, and behaviour that's out of character is flagged more reliably. Keep the maintainer note here in the README, not in the prompt — instructions addressed to a human waste the small model's context and can confuse it. A larger model (e.g. `qwen2.5-coder:7b` over `:3b`) also improves judgment at the cost of runner RAM and latency.
 
 ## Repository layout
 
