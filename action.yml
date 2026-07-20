@@ -98,6 +98,9 @@ runs:
         # never interpolated directly into the run: block.
         EVENT_NAME: ${{ github.event_name }}
         EVENT_BEFORE: ${{ github.event.before }}
+        # PR base tip SHA — an ancestor of the checked-out merge commit, so it is
+        # always present under fetch-depth: 0 (no remote-tracking-name lookup needed).
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
       run: |
         # scan.py + prompts come from THIS tool repo via $GITHUB_ACTION_PATH.
         # The diff is taken from the CONSUMER repo (the current working directory).
@@ -117,7 +120,7 @@ runs:
         # writes comment.md (the rendered markdown) into the working directory.
         export PROMPT_FILE="$GITHUB_ACTION_PATH/prompts/intent.md"
         if [ "$EVENT_NAME" = "pull_request" ]; then
-          BASE="origin/$GITHUB_BASE_REF"
+          BASE="${PR_BASE_SHA:-origin/$GITHUB_BASE_REF}"
         else
           BASE="$EVENT_BEFORE"
           if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
