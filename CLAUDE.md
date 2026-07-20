@@ -1,4 +1,4 @@
-# Working rules for this repo
+# Working rules for this repository
 
 ## Do not execute
 
