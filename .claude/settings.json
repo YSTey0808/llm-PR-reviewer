@@ -25,7 +25,8 @@
       "Bash(python tests/model/test_harness.py)",
       "Bash(python tests/model/test_failopen.py -v)",
       "Bash(python tests/model/test_corroborate.py -v)",
-      "Bash(python tests/model/test_bigpush.py -v)"
+      "Bash(python tests/model/test_bigpush.py -v)",
+      "Bash(git checkout *)"
     ]
   }
 }

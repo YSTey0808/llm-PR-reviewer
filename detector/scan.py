@@ -37,15 +37,27 @@ old truncate-and-floor behaviour.
 Env (defaults shown):
   OLLAMA_URL http://localhost:11434 | MODEL qwen2.5-coder:3b
   PROMPT_FILE prompts/intent.md | COMMENT_FILE comment.md
-  BLOCK_THRESHOLD 70 | REVIEW_THRESHOLD 40 | MAX_CHARS 16000 | NUM_CTX 4096
-  NUM_PREDICT 768 | FAIL_SAFE review | REQUEST_TIMEOUT 600 | RETRY_BACKOFF 2
-  RETRIES 3 | INJECTION_FLOOR 55 | FAIL_CLOSED false
-  MAX_CHARS is the PER-CHUNK budget | MAX_CHUNKS 8 | REDUCE concat
+  BLOCK_THRESHOLD 70 | REVIEW_THRESHOLD 40 | SCAN_MAX_CHARS 7000 | NUM_CTX 8192
+  NUM_PREDICT (derived from SCHEMA, ~2048) | FAIL_SAFE review | REQUEST_TIMEOUT 600
+  RETRY_BACKOFF 2 | RETRIES 3 | INJECTION_FLOOR 55 | FAIL_CLOSED false
+  SCAN_MAX_CHARS (legacy MAX_CHARS) is the PER-CHUNK budget; NUM_CTX is the
+  per-request context-window CAP (fit_num_ctx sizes each call under it).
+  SINGLE_FILE_MAX_FACTOR 3 | MAX_CHUNKS 8 | REDUCE concat
+  SCAN_MAX_SECONDS 900 (phase-2 budget; MAX_SECONDS honoured as fallback)
+  EST_CHUNK_SECONDS 240 (phase-2 per-chunk estimate)
+
+Two-phase tiered scan: classify_file() sorts each changed file into tier1
+(executable logic — phase 1, ALWAYS scanned, no time limit), tier2 (static
+config/manifests — phase 2, best-effort under SCAN_MAX_SECONDS), or tier3
+(inert binaries/prose — skipped, never sent to the model). --dry-run prints the
+full classification/chunking plan and makes no model calls.
 """
 
 import argparse
+import fnmatch
 import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -64,23 +76,37 @@ BLOCK = int(os.environ.get("BLOCK_THRESHOLD", "70"))
 REVIEW = int(os.environ.get("REVIEW_THRESHOLD", "40"))
 # PER-CHUNK character budget: the most diff chars sent to the model in ONE call.
 # A large diff is split on file boundaries and packed into chunks under this
-# budget (see pack()), so this must be sized by the SAME fit math the single
-# call always relied on: NUM_CTX budget - system prompt - NUM_PREDICT output
-# headroom. NB: the 16000 default (~4000 tok) plus the ~1.5k-tok system prompt
-# and 768 output tokens (~6k tok) OVERFLOWS the default NUM_CTX=4096 — Ollama
-# would silently clip it. Raise NUM_CTX (and the action's warm-up num_ctx to
-# match) for the full budget; the default is kept for backward compatibility.
-MAX_CHARS = int(os.environ.get("MAX_CHARS", "16000"))
+# budget (see pack()). Stage 3 bullet 1: default lowered 16000 -> 7000. Smaller
+# chunks mean a smaller per-request context window (fit_num_ctx now sizes num_ctx
+# to the actual chunk instead of a fixed window) and lower per-call latency. The
+# window is derived from the chunk, so this need not be hand-matched to NUM_CTX.
+# Override with SCAN_MAX_CHARS (legacy MAX_CHARS still honoured as a fallback).
+MAX_CHARS = int(os.environ.get("SCAN_MAX_CHARS",
+                               os.environ.get("MAX_CHARS", "7000")))
+# Stage 3 bullet 4: a single file whose diff ALONE exceeds MAX_CHARS * this factor
+# is NOT scanned — not even truncated — because a heavily truncated giant file is
+# an unreliable review that would still read as "scanned". It floors the verdict
+# to review with a "diff too large for automated scan" finding. Env override:
+# SINGLE_FILE_MAX_FACTOR.
+SINGLE_FILE_MAX_FACTOR = float(os.environ.get("SINGLE_FILE_MAX_FACTOR", "3"))
 # Hard cap on model calls per scan: bounds total wall-clock (each chunk is one
 # bounded warm call under REQUEST_TIMEOUT). Files that don't fit within this many
 # chunks are left unscanned and floor the verdict to review.
 MAX_CHUNKS = max(1, int(os.environ.get("MAX_CHUNKS", "8")))
-# Wall-clock budget for model calls, enforced ALONGSIDE MAX_CHUNKS (whichever
-# hits first). A warm 3B does ~5-15s/chunk, so a fixed MAX_CHUNKS=8 leaves
-# throughput on the table on a fast runner; conversely a slow/cold model must
-# not blow the CI job's own timeout. Chunks not reached before the budget are
-# left UNSCANNED and floor the verdict to review — same as budget overflow.
-MAX_SECONDS = float(os.environ.get("MAX_SECONDS", "300"))
+# Wall-clock budget for PHASE 2 (tier2, static config) model calls. PHASE 1
+# (tier1, executable logic) has NO time ceiling other than the CI job's own
+# timeout — executable logic is always scanned to completion. Phase 2 runs against
+# whatever of this budget phase 1 left unused; a tier2 chunk that can't be
+# expected to finish in the remaining time is floored to review ("budget
+# exhausted") rather than started. Renamed MAX_SECONDS -> SCAN_MAX_SECONDS (the
+# old name is still honoured as a fallback); default raised 300 -> 900.
+MAX_SECONDS = float(os.environ.get("SCAN_MAX_SECONDS",
+                                   os.environ.get("MAX_SECONDS", "900")))
+# Fallback per-chunk duration estimate for the phase-2 budget pre-check, used
+# BEFORE any chunk has completed this run (afterwards the running average of
+# completed chunks is used). A tier2 chunk is not started when the remaining
+# budget is below the estimate — never begin a call we don't expect to finish.
+EST_CHUNK_SECONDS = float(os.environ.get("EST_CHUNK_SECONDS", "240"))
 # Above this raw-diff size, re-run `git diff` with --unified=1 instead of =3:
 # context lines are roughly half the bytes of a big diff, so trimming them keeps
 # more actual CHANGES inside the per-chunk budget. Only affects the --git-base
@@ -90,16 +116,41 @@ LARGE_DIFF_CHARS = int(os.environ.get("LARGE_DIFF_CHARS", "200000"))
 # (default); "llm" = one extra, presentation-only model call that rewrites the
 # reasoning narrative (never the score/findings/verdict).
 REDUCE = os.environ.get("REDUCE", "concat").lower()
-# Ollama's context window. Its default (2048 tokens) is smaller than MAX_CHARS,
-# so without this the prompt is SILENTLY truncated by Ollama before the model
-# sees it. Sized to hold the system prompt + a per-chunk diff + output headroom.
-# Bigger = more RAM/slower on the runner; the action warms the model with this
-# SAME value so the timed scan call reuses the loaded model.
-NUM_CTX = int(os.environ.get("NUM_CTX", "4096"))
-# Hard ceiling on generated tokens. Without it, under constrained JSON decoding
-# a small model can run away generating until it hits the context limit, blowing
-# past REQUEST_TIMEOUT. This is the primary guard against inference timeouts.
-NUM_PREDICT = int(os.environ.get("NUM_PREDICT", "768"))
+# Per-request context window CAP (Stage 3 bullet 2). The window is no longer a
+# single fixed size: fit_num_ctx() sizes it PER CHUNK from the actual prompt +
+# chunk length + response headroom, rounded up to the nearest 1024, and never
+# above this cap. A chunk whose prompt would need MORE than the cap is not sent
+# truncated — it is refused (ContextError) and its files floor to review, so
+# silently clipped content can never be marked "scanned". Default raised
+# 4096 -> 8192. NOTE for the calling action: set the warm-up num_ctx to this cap
+# so the largest request reuses the resident model; a chunk that rounds to a
+# smaller window may cost one Ollama reload.
+NUM_CTX = int(os.environ.get("NUM_CTX", "8192"))
+# chars-per-token estimate and rounding step for per-request window sizing
+# (bullet 2 specifies tokens ≈ chars/3, rounded up to the nearest 1024).
+CTX_CHARS_PER_TOKEN = float(os.environ.get("CTX_CHARS_PER_TOKEN", "3"))
+CTX_ROUND_TOKENS = 1024
+# Hard ceiling on generated tokens — the primary guard against inference timeouts
+# (a small model under constrained JSON decoding can otherwise run away to the
+# context limit). Stage 3 bullet 3: the default is DERIVED from the SCHEMA so it
+# is TIGHT (no runaway) yet always large enough to emit the whole reply, whose
+# risk_score field is generated LAST — truncating before it yields an unparseable
+# reply that is (safely) distrusted as a content failure. Worst-case reply size
+# under SCHEMA:
+#   key_changes          5 x 120 chars                        =  600
+#   suspicious_findings  8 x (file ~80 + reason ~240)          = 2560
+#   reasoning            1 x 1200 chars (schema maxLength)      = 1200
+#   risk_score + JSON braces/keys/quotes                        ~  240
+#   -> ~4600 chars / 3 chars-per-token ≈ 1534 tok, +~33% margin, round up 256.
+_SCHEMA_MAX_CHARS = 5 * 120 + 8 * (80 + 240) + 1200 + 240        # ≈ 4600
+_NUM_PREDICT_DEFAULT = -(-int(_SCHEMA_MAX_CHARS / 3 * 1.33) // 256) * 256   # 2048
+NUM_PREDICT = int(os.environ.get("NUM_PREDICT", str(_NUM_PREDICT_DEFAULT)))
+# Response-token headroom reserved inside every per-request window. Kept at least
+# NUM_PREDICT so the full reply (risk_score emits LAST) always fits — a flat 512
+# would let a long-but-legitimate reply be clipped before risk_score, reading as
+# a content failure. Bullet 2 names 512; we use max(512, NUM_PREDICT) so the
+# window never under-reserves for the decode budget we actually allow.
+CTX_RESPONSE_HEADROOM = max(512, NUM_PREDICT)
 # Verdict floor on infra error. Clamp to a real verdict: "pass" would silently
 # disable the fail-safe, and any unrecognised value would KeyError in escalate().
 _FAIL_SAFE_RAW = os.environ.get("FAIL_SAFE", "review").strip().lower()
@@ -168,6 +219,168 @@ SIGNAL_KEYWORDS = re.compile(
     r"|socket|token|secret|password|curl)",
     re.IGNORECASE,
 )
+
+# ---------------------------------------------------------------------------
+# Intent-focused file classification (Stage 1).
+#
+# classify_file() sorts a changed file into one of three tiers by INTENT, not by
+# vulnerability pattern — CodeQL/Dependabot already own static vuln/dependency
+# patterns, so this gate prioritises EXECUTABLE LOGIC. A later stage maps the
+# tiers to scan policy (tier1: always scanned; tier2: best-effort, floors to
+# review; tier3: skipped). This stage ONLY classifies — it does not change the
+# scanning loop, chunking, or budget logic. The lists below are separate from the
+# chunk-priority regexes above (HIGH_RISK_PATH / SIGNAL_KEYWORDS) on purpose:
+# those ORDER files within a budget, these decide a file's SCAN FATE.
+#
+#   tier1  executable logic — source, scripts, CI/build, OR any file whose diff
+#          carries an execution/network/secrets/obfuscation content signal.
+#   tier2  static config / manifests / lockfiles, plus anything unmatched.
+#   tier3  provably inert — binary blobs and plain prose with no signals.
+#
+# RULES enforced by classify_file(): signals only ever PROMOTE to tier1 (never
+# demote); any exception or ambiguity returns tier1 — the gate never defaults a
+# file DOWNWARD into a lighter-touch tier.
+#
+# Every list is module-level so the taxonomy is easy to extend without touching
+# the logic.
+# ---------------------------------------------------------------------------
+
+# tier1 by extension: executable source and shell/CI scripts.
+TIER1_SOURCE_EXTS = [
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go", ".rs", ".rb", ".php",
+    ".c", ".cpp", ".cs", ".kt", ".swift", ".scala",
+]
+TIER1_SCRIPT_EXTS = [".sh", ".ps1", ".bat", ".psm1"]
+
+# tier1 by path shape: CI/build logic that has no telltale extension of its own
+# (or a conventional basename). Matched case-insensitively against the full path.
+TIER1_PATH_PATTERNS = [
+    re.compile(r"\.github/workflows/", re.IGNORECASE),
+    re.compile(r"(^|/)Jenkinsfile", re.IGNORECASE),
+    re.compile(r"(^|/)Dockerfile", re.IGNORECASE),
+    re.compile(r"(^|/)docker-compose", re.IGNORECASE),
+    re.compile(r"(^|/)Makefile", re.IGNORECASE),
+]
+
+# tier1 content signals — ANY hit in the diff text promotes the file to tier1
+# regardless of path or extension. Grouped by intent family so each family can be
+# extended independently; signals only ever promote, they never demote.
+TIER1_CONTENT_SIGNALS = [
+    # process execution
+    re.compile(r"subprocess|os\.system|exec\(|eval\(|child_process"
+               r"|Runtime\.getRuntime|pickle\.loads|__import__", re.IGNORECASE),
+    # network egress
+    re.compile(r"requests|urllib|http\.client|fetch\(|curl|wget|socket|webhook",
+               re.IGNORECASE),
+    # env / secrets (substring, case-insensitive)
+    re.compile(r"os\.environ|process\.env|getenv|secrets\.|GITHUB_TOKEN"
+               r"|api_key|password", re.IGNORECASE),
+    # obfuscation: a base64-looking run longer than 200 chars
+    re.compile(r"[A-Za-z0-9+/]{200,}={0,2}"),
+    # obfuscation: dense \x escape runs
+    re.compile(r"(?:\\x[0-9A-Fa-f]{2}){4,}"),
+    # obfuscation: chr( ) concatenation chains
+    re.compile(r"(?:chr\([^)]*\)\s*\+\s*){2,}", re.IGNORECASE),
+]
+
+# tier2 manifests / lockfiles by basename. Globs (requirements*.txt, Pipfile*,
+# build.gradle*) are matched with fnmatch against the basename.
+TIER2_MANIFESTS = [
+    "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+    "requirements*.txt", "Pipfile*", "poetry.lock", "go.mod", "go.sum",
+    "Cargo.toml", "Cargo.lock", "pom.xml", "build.gradle*",
+]
+# tier2 static-config extensions. NB: .yml/.yaml count here only when OUTSIDE
+# .github/workflows/ — those are tier1 via TIER1_PATH_PATTERNS, which is checked
+# first in classify_file.
+TIER2_CONFIG_EXTS = [
+    ".yml", ".yaml", ".json", ".toml", ".ini", ".cfg", ".tf", ".tfvars",
+]
+
+# tier3 provably-inert file extensions: binaries, fonts, media, pdf.
+TIER3_BINARY_EXTS = [
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".woff", ".woff2",
+    ".ttf", ".pdf",
+]
+# tier3 prose — only when it carries NO tier1 content signal (guaranteed by
+# classify_file's ordering) and is not under .github/.
+TIER3_PROSE_EXTS = [".md", ".rst", ".txt"]
+# Marker git writes for a binary hunk; its presence in the diff => tier3.
+TIER3_BINARY_MARKER = re.compile(r"^Binary files .* differ$", re.MULTILINE)
+
+
+def _ext(path):
+    """Lower-cased extension of a path's basename ('' if none)."""
+    return posixpath.splitext(posixpath.basename(path))[1].lower()
+
+
+def _has_tier1_signal(diff_text):
+    """True if any tier1 content signal appears anywhere in the diff text.
+
+    Checked FIRST by classify_file so signals beat paths; they only ever promote
+    a file to tier1 and never demote one.
+    """
+    return any(sig.search(diff_text) for sig in TIER1_CONTENT_SIGNALS)
+
+
+def _is_tier1_path(path):
+    """True if the path is executable logic by extension or by CI/build shape."""
+    ext = _ext(path)
+    if ext in TIER1_SOURCE_EXTS or ext in TIER1_SCRIPT_EXTS:
+        return True
+    return any(pat.search(path) for pat in TIER1_PATH_PATTERNS)
+
+
+def _is_tier2(path):
+    """True if the path is a declared static manifest/lockfile or a static-config
+    extension. Anything unmatched by every tier rule is ALSO treated as tier2 by
+    classify_file's catch-all; this names the EXPLICIT members."""
+    base = posixpath.basename(path)
+    if any(fnmatch.fnmatchcase(base, pat) for pat in TIER2_MANIFESTS):
+        return True
+    return _ext(path) in TIER2_CONFIG_EXTS
+
+
+def _is_tier3(path, diff_text):
+    """True if the file is provably inert: a binary blob (git binary marker or a
+    binary extension), or plain prose with no tier1 signal and not under .github/.
+
+    Callers reach here only after _has_tier1_signal ruled signals out, so the
+    'no content signal' half of the prose rule is already guaranteed.
+    """
+    if _ext(path) in TIER3_BINARY_EXTS:
+        return True
+    if TIER3_BINARY_MARKER.search(diff_text):
+        return True
+    if _ext(path) in TIER3_PROSE_EXTS and not re.search(
+            r"(^|/)\.github/", path, re.IGNORECASE):
+        return True
+    return False
+
+
+def classify_file(path, diff_text):
+    """Sort a changed file into "tier1" | "tier2" | "tier3" by INTENT.
+
+    Order is load-bearing and encodes the two RULES:
+      - signals beat paths — a content signal anywhere in the diff promotes to
+        tier1 before any path/extension rule is consulted;
+      - fail UP — any exception or ambiguity returns tier1, never a lighter tier.
+    """
+    try:
+        if _has_tier1_signal(diff_text):        # signals beat paths (promote-only)
+            return "tier1"
+        if _is_tier1_path(path):                # executable logic by path/ext
+            return "tier1"
+        if _is_tier3(path, diff_text):          # binary blob or signal-free prose
+            return "tier3"
+        if _is_tier2(path):                     # declared manifest / static config
+            return "tier2"
+        return "tier2"                          # anything unmatched -> tier2 (static)
+    except Exception:
+        # Never default a file downward on error — an unclassifiable file is the
+        # most suspicious kind, so it floors to the always-scanned tier.
+        return "tier1"
+
 
 # System prompt for the optional REDUCE="llm" pass. PRESENTATION-ONLY: it merges
 # the per-chunk narratives into one, and must not invent findings or change the
@@ -239,6 +452,13 @@ class InfraError(Exception):
 class ContentError(Exception):
     """Ollama replied but the content could not be parsed into the schema. A
     diff that reliably breaks the parser looks like evasion — distrust it."""
+
+
+class ContextError(Exception):
+    """The system prompt + this chunk need a larger context window than the
+    NUM_CTX cap allows. Sending it would force Ollama to SILENTLY truncate the
+    prompt — marking unscanned content as "scanned", a false-negative source — so
+    we refuse the call and floor the chunk's files to review instead."""
 
 
 def escalate(verdict, floor):
@@ -436,22 +656,35 @@ def priority(path, file_diff):
     return score
 
 
-def pack(files, budget, max_chunks):
+def pack(files, budget, max_chunks, single_file_factor=None):
     """Greedy-pack whole files into at most `max_chunks` chunks under `budget`
     chars each, scanning the highest-priority files first.
 
-    Returns (chunks, overflow_files, truncated_files):
+    Returns (chunks, overflow_files, truncated_files, too_large_files):
       - chunks: list of (chunk_text, [paths]) to send to the model.
-      - truncated_files: paths of single files larger than `budget`; each gets
-        its own chunk truncated to `budget` with a "[file truncated]" marker.
+      - truncated_files: paths of single files larger than `budget` (but within
+        the single-file hard limit); each gets its own chunk truncated to
+        `budget` with a "[file truncated]" marker (scanned, but partial).
       - overflow_files: paths that could not be placed once max_chunks chunks
         exist (left UNSCANNED — the caller floors the verdict to review).
+      - too_large_files: single files whose diff ALONE exceeds
+        `budget * single_file_factor` (default SINGLE_FILE_MAX_FACTOR). These are
+        NOT scanned at all — not even truncated — because a heavily clipped giant
+        file is an unreliable review; the caller floors them to review with a
+        "diff too large for automated scan" finding (Stage 3 bullet 4).
     """
+    if single_file_factor is None:
+        single_file_factor = SINGLE_FILE_MAX_FACTOR
+    hard_limit = budget * single_file_factor
     ranked = sorted(files, key=lambda f: priority(f[0], f[1]), reverse=True)
     chunks = []                                 # list of [text, [paths]]
     overflow_files = []
     truncated_files = []
+    too_large_files = []
     for path, fdiff in ranked:
+        if len(fdiff) > hard_limit:             # too big to scan even truncated
+            too_large_files.append(path)
+            continue
         if len(fdiff) > budget:                 # oversize single file -> own chunk
             if len(chunks) < max_chunks:
                 chunks.append([fdiff[:budget] + "\n[file truncated]", [path]])
@@ -471,10 +704,32 @@ def pack(files, budget, max_chunks):
                 chunks.append([fdiff, [path]])
             else:
                 overflow_files.append(path)
-    return [(text, paths) for text, paths in chunks], overflow_files, truncated_files
+    return ([(text, paths) for text, paths in chunks], overflow_files,
+            truncated_files, too_large_files)
 
 
-def call_model(system, user, schema):
+def fit_num_ctx(system, user):
+    """Per-request Ollama context window for ONE call (Stage 3 bullet 2).
+
+    Sized to THIS call rather than a fixed maximum: estimated prompt + chunk
+    tokens (chars / CTX_CHARS_PER_TOKEN) plus CTX_RESPONSE_HEADROOM for the reply,
+    rounded UP to the next CTX_ROUND_TOKENS, and never above the NUM_CTX cap.
+
+    Returns (num_ctx, fits). When the required window exceeds the cap, `fits` is
+    False and num_ctx is the cap: the caller MUST NOT send a truncated prompt —
+    it raises ContextError so the chunk's files floor to review. Smaller windows
+    on small chunks are the latency win; the cap plus the refuse-don't-truncate
+    rule is the fail-closed guard against silently clipped, "scanned" content.
+    """
+    est_tokens = (len(system) + len(user)) / CTX_CHARS_PER_TOKEN
+    needed = int(est_tokens) + CTX_RESPONSE_HEADROOM
+    rounded = -(-needed // CTX_ROUND_TOKENS) * CTX_ROUND_TOKENS   # round up
+    if rounded > NUM_CTX:
+        return NUM_CTX, False
+    return rounded, True
+
+
+def call_model(system, user, schema, num_ctx):
     payload = {
         "model": MODEL,
         "messages": [
@@ -484,7 +739,7 @@ def call_model(system, user, schema):
         "stream": False,
         "format": schema,                       # structured output
         "keep_alive": -1,                       # keep model resident between calls
-        "options": {"temperature": 0, "seed": 7, "num_ctx": NUM_CTX,
+        "options": {"temperature": 0, "seed": 7, "num_ctx": num_ctx,
                     "num_predict": NUM_PREDICT},
     }
     req = urllib.request.Request(
@@ -543,17 +798,23 @@ def review_chunk(hunks, system):
     """One model call over a single chunk of the diff, wrapped as untrusted data.
     Retries
     transient failures with exponential backoff before giving up. Returns the
-    parsed result, or raises InfraError / ContentError so the caller can apply
-    the right fail-safe policy for each failure kind.
+    parsed result, or raises InfraError / ContentError / ContextError so the
+    caller can apply the right fail-safe policy for each failure kind.
 
     A blip should not open the gate, and retrying shrinks the DoS surface: a
     single dropped request can't flip a scan to fail-safe on its own.
     """
     user = f"<untrusted_diff>\n{hunks}\n</untrusted_diff>"
+    num_ctx, fits = fit_num_ctx(system, user)
+    if not fits:
+        # Refuse rather than let Ollama silently clip the prompt (bullet 2): a
+        # clipped prompt would mark unscanned content as "scanned". Deterministic
+        # in the chunk size, so there is nothing to retry.
+        raise ContextError("chunk exceeds context")
     last = None                                 # (kind, exception) of the final attempt
     for attempt in range(RETRIES):
         try:
-            raw = call_model(system, user, SCHEMA)
+            raw = call_model(system, user, SCHEMA, num_ctx)
         except InfraError as exc:
             last = ("infra", exc)
             log(f"model call failed (attempt {attempt + 1}/{RETRIES}): {exc}",
@@ -583,7 +844,7 @@ def corroborate(result, hunks, system):
     """
     try:
         second = review_chunk(hunks, system)
-    except (InfraError, ContentError):
+    except (InfraError, ContentError, ContextError):
         return result                           # failure must not rescue a block
     if second["risk_score"] >= BLOCK:
         return result                           # block corroborated
@@ -667,8 +928,11 @@ def reduce_llm(result, notable_reasonings):
     notes_txt = "\n\n".join(notable_reasonings) or "(none)"
     user = (f"Suspicious findings:\n{findings_txt}\n\n"
             f"Per-chunk reasoning notes:\n{notes_txt}")
+    num_ctx, fits = fit_num_ctx(REDUCE_SYSTEM, user)
+    if not fits:
+        return None                              # presentation-only; skip if oversize
     try:
-        raw = call_model(REDUCE_SYSTEM, user, REDUCE_SCHEMA)
+        raw = call_model(REDUCE_SYSTEM, user, REDUCE_SCHEMA, num_ctx)
     except InfraError:
         return None
     try:
@@ -761,6 +1025,9 @@ def render_markdown(result, verdict, failsafe=None, injection=False, coverage=No
         binary = coverage.get("binary") or []
         excluded = coverage.get("excluded") or []
         lockfiles = coverage.get("lockfiles") or []
+        skipped = coverage.get("skipped") or []
+        too_large = coverage.get("too_large") or []
+        context = coverage.get("context") or []
         lines += [
             f"_Scanned {coverage['files_scanned']} files across "
             f"{coverage['num_chunks']} chunks._",
@@ -790,6 +1057,19 @@ def render_markdown(result, verdict, failsafe=None, injection=False, coverage=No
                 lines.append("> - **Truncated (file larger than one chunk):** "
                              + cap_paths(truncated))
             lines.append("")
+        if too_large or context:
+            lines += [
+                "> ⛔ **Refused to scan — verdict floored to at least `review`.** "
+                "These files were NOT sent to the model and were NOT reviewed:",
+                "",
+            ]
+            if too_large:
+                lines.append("> - **Too large for automated scan (single-file diff "
+                             "exceeds the limit):** " + cap_paths(too_large))
+            if context:
+                lines.append("> - **Chunk exceeds the model context window:** "
+                             + cap_paths(context))
+            lines.append("")
         # EXCLUDED / lockfiles are informational — they do NOT floor the verdict.
         # "Chose not to look (by policy)" is deliberately distinct from the
         # "ran out of budget" floor above.
@@ -803,6 +1083,13 @@ def render_markdown(result, verdict, failsafe=None, injection=False, coverage=No
             lines += [
                 "_Dependency lockfiles checked by rule, not sent to the model:_ "
                 + cap_paths(lockfiles),
+                "",
+            ]
+        if skipped:
+            lines += [
+                "_Tier-3 inert files (binaries / plain prose) skipped by policy "
+                "— never sent to the model; did not affect the verdict:_ "
+                + cap_paths(skipped),
                 "",
             ]
     if scored:
@@ -878,11 +1165,14 @@ def emit(result, verdict, failsafe=None, injection=False, coverage=None,
     binary = cov.get("binary", [])
     excluded = cov.get("excluded", [])
     lockfiles = cov.get("lockfiles", [])
+    skipped = cov.get("skipped", [])
+    too_large = cov.get("too_large", [])
+    context = cov.get("context", [])
     print(json.dumps({
         "verdict": verdict,
         "score": result["risk_score"] if scored else None,
         "scored": scored,
-        "truncated": bool(truncated or overflow),
+        "truncated": bool(truncated or overflow or too_large or context),
         "injection": injection,
         "failsafe": failsafe,
         "bootstrap": bool(cov.get("bootstrap")),
@@ -890,9 +1180,12 @@ def emit(result, verdict, failsafe=None, injection=False, coverage=None,
         "files_scanned": cov.get("files_scanned", 0),
         "files_unscanned": overflow,
         "files_truncated": truncated,
+        "files_too_large": too_large,
+        "files_context": context,
         "files_binary": binary,
         "files_excluded": excluded,
         "files_lockfiles": lockfiles,
+        "files_skipped": skipped,
         "key_changes": result["key_changes"],
         "suspicious_findings": result["suspicious_findings"],
         "reasoning": result["reasoning"],
@@ -911,6 +1204,177 @@ def emit(result, verdict, failsafe=None, injection=False, coverage=None,
     return 1 if verdict == "block" else 0
 
 
+def _has_signal(fdiff):
+    """Whether a file's diff carries a tier1 content signal — used to ORDER
+    chunks so signal-bearing files are scanned first within their tier. Guarded:
+    an ordering heuristic must never crash a scan, and 'unknown' sorts as
+    high-priority (fail toward looking sooner)."""
+    try:
+        return _has_tier1_signal(fdiff)
+    except Exception:
+        return True
+
+
+def order_chunks_by_signal(chunks, signal_paths):
+    """Stable-sort chunks so any chunk containing a signal-bearing file comes
+    first. Order WITHIN each group is preserved (pack() already ranked them by
+    priority), so this only lifts signal chunks to the front of their tier."""
+    return sorted(chunks,
+                  key=lambda c: 0 if any(p in signal_paths for p in c[1]) else 1)
+
+
+def scan_tier(chunks, tier, system, deadline, durations):
+    """Scan one tier's already-ordered chunks. Returns (outcomes, budget_floored).
+
+    deadline: monotonic instant after which no NEW chunk may START, or None for
+    no ceiling (phase 1 / tier1). When a deadline is set, a chunk is NOT started
+    — and its files floored to review ("budget exhausted") — if no time remains
+    OR the remaining budget is below the running average duration of completed
+    chunks this run (EST_CHUNK_SECONDS until one completes). An Ollama error
+    floors that chunk's files to review via its outcome status, in BOTH phases.
+    `durations` is shared across phases and accumulates completed-chunk seconds.
+    """
+    outcomes = []
+    budget_floored = []
+    for i, (text, paths) in enumerate(chunks):
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            est = (sum(durations) / len(durations)) if durations else EST_CHUNK_SECONDS
+            if remaining <= 0 or remaining < est:
+                budget_floored.extend(paths)
+                outcomes.append({"status": "budget", "result": None,
+                                 "paths": paths, "tier": tier})
+                log(f"PHASE2 budget: not starting {tier} chunk {i + 1}/"
+                    f"{len(chunks)} ({len(paths)} files); remaining="
+                    f"{remaining:.0f}s < est={est:.0f}s -> floor to review",
+                    force=True)
+                continue
+        log(f"{tier} chunk {i + 1}/{len(chunks)} files={len(paths)} "
+            f"chars={len(text)}")
+        t0 = time.monotonic()
+        try:
+            res = review_chunk(text, system)
+        except InfraError as exc:
+            outcomes.append({"status": "infra", "result": None, "paths": paths,
+                             "tier": tier})
+            log(f"FAILSAFE kind=infra tier={tier} chunk={i + 1} "
+                f"fail_closed={FAIL_CLOSED} detail={exc}", force=True)
+        except ContentError as exc:
+            outcomes.append({"status": "content", "result": None, "paths": paths,
+                             "tier": tier})
+            log(f"FAILSAFE kind=content tier={tier} chunk={i + 1} "
+                f"fail_closed={FAIL_CLOSED} detail={exc}", force=True)
+        except ContextError as exc:
+            # Chunk needs more than the NUM_CTX cap; we refused to send it
+            # truncated. Its files are UNSCANNED and floor to review below.
+            outcomes.append({"status": "context", "result": None, "paths": paths,
+                             "tier": tier})
+            log(f"FAILSAFE kind=context tier={tier} chunk={i + 1} "
+                f"detail={exc} -> floor {len(paths)} file(s) to review",
+                force=True)
+        else:
+            durations.append(time.monotonic() - t0)
+            # A would-be block gets one independent second look before it can
+            # block the PR (demotes to review on disagreement; keeps block on a
+            # failed second call).
+            if CORROBORATE and res["risk_score"] >= BLOCK:
+                res = corroborate(res, text, system)
+            outcomes.append({"status": "ok", "result": res, "paths": paths,
+                             "tier": tier})
+    return outcomes, budget_floored
+
+
+def print_dry_run(tier_files, tier_chunks, signal_paths, extras):
+    """Print the full classification/chunking/order plan to stdout — NO model
+    calls. This is the primary way to eyeball what the two-phase scan will do."""
+    out = ["=== INTENT GATE DRY RUN — classification & scan plan "
+           "(NO model calls) ===",
+           f"MAX_CHARS={MAX_CHARS}  MAX_CHUNKS={MAX_CHUNKS}  "
+           f"SCAN_MAX_SECONDS={MAX_SECONDS:.0f}  "
+           f"EST_CHUNK_SECONDS={EST_CHUNK_SECONDS:.0f}"]
+    if extras.get("bootstrap"):
+        out.append("BOOTSTRAP MODE: initial-import-sized push — only CI/"
+                   "executable surfaces are scanned; verdict forced to review.")
+    if extras.get("injection"):
+        out.append(f"INJECTION MARKERS DETECTED: score will be floored to "
+                   f">= {INJECTION_FLOOR}.")
+    out.append("")
+
+    scan_no = 0
+    for tier, label in (
+            ("tier1", "executable logic — PHASE 1, ALWAYS scanned, no time limit"),
+            ("tier2", "static config/manifests — PHASE 2, best-effort, budgeted")):
+        files = tier_files[tier]
+        chunks = tier_chunks[tier]
+        out.append(f"-- {tier.upper()}: {label}")
+        out.append(f"   files={len(files)}  chunks={len(chunks)}")
+        for text, paths in chunks:
+            scan_no += 1
+            sig = " [has signal -> scanned first]" if any(
+                p in signal_paths for p in paths) else ""
+            out.append(f"   scan #{scan_no}: {len(paths)} file(s), "
+                       f"{len(text)} chars{sig}")
+            for p in paths:
+                mark = "*" if p in signal_paths else " "
+                out.append(f"        {mark} {p}")
+        out.append("")
+
+    out.append("-- TIER3: provably inert — SKIPPED (never sent to the model)")
+    skipped = [p for p, _d in tier_files["tier3"]]
+    out += [f"        - {p}" for p in skipped] or ["        (none)"]
+    out.append("")
+
+    out.append("-- NOT SENT TO MODEL (deterministic / policy)")
+    out.append("   lockfiles (regex-scanned): "
+               + (", ".join(extras.get("lockfiles") or []) or "(none)"))
+    out.append("   excluded (vendored/generated): "
+               + (", ".join(extras.get("excluded") or []) or "(none)"))
+    out.append("   binary (metadata only): "
+               + (", ".join(extras.get("binary") or []) or "(none)"))
+    out.append("   too large to scan (single file > "
+               f"{MAX_CHARS * SINGLE_FILE_MAX_FACTOR:.0f} chars) -> floors review: "
+               + (", ".join(extras.get("too_large") or []) or "(none)"))
+    out.append(f"   deterministic findings: {len(extras.get('determ_findings') or [])}")
+    out.append("")
+
+    n1, n2 = len(tier_chunks["tier1"]), len(tier_chunks["tier2"])
+    out.append(f"Budget estimate: phase 1 = {n1} tier1 chunk(s), no time limit; "
+               f"phase 2 = up to {n2} tier2 chunk(s) at ~{EST_CHUNK_SECONDS:.0f}s "
+               f"each, within {MAX_SECONDS:.0f}s total.")
+    print("\n".join(out))
+
+
+def print_run_summary(verdict, tier_stats, floored_budget, floored_error,
+                      truncated, skipped, phase1_elapsed, phase2_elapsed,
+                      total_elapsed, too_large=None):
+    """Plain-text end-of-run summary on STDERR (stdout stays the JSON contract)."""
+    lines = ["", "=== INTENT GATE RUN SUMMARY ===",
+             f"Final verdict: {verdict.upper()}",
+             f"Elapsed: total {total_elapsed:.1f}s "
+             f"(phase1 {phase1_elapsed:.1f}s, phase2 {phase2_elapsed:.1f}s)",
+             "Per-tier (scanned / floored / skipped):",
+             f"  tier1: {tier_stats['tier1'][0]} / {tier_stats['tier1'][1]} / -",
+             f"  tier2: {tier_stats['tier2'][0]} / {tier_stats['tier2'][1]} / -",
+             f"  tier3: - / - / {tier_stats['tier3'][2]}"]
+    if floored_budget:
+        lines.append("Floored to review — budget exhausted (unscanned):")
+        lines += [f"  - {p}" for p in floored_budget]
+    if floored_error:
+        lines.append("Floored to review — model/scan error:")
+        lines += [f"  - {p} ({kind})" for p, kind in floored_error]
+    if truncated:
+        lines.append("Scanned but truncated (file larger than one chunk):")
+        lines += [f"  - {p}" for p in truncated]
+    if too_large:
+        lines.append("Refused, floored to review — diff too large for automated "
+                     "scan (single file > MAX_CHARS * SINGLE_FILE_MAX_FACTOR):")
+        lines += [f"  - {p}" for p in too_large]
+    if skipped:
+        lines.append("Skipped (tier3, provably inert — not sent to model):")
+        lines += [f"  - {p}" for p in skipped]
+    print("\n".join(lines), file=sys.stderr)
+
+
 def main():
     global _VERBOSE, MAX_CHARS
     ap = argparse.ArgumentParser()
@@ -918,6 +1382,9 @@ def main():
     ap.add_argument("--git-base", help="base ref for git diff (CI)")
     ap.add_argument("--verbose", action="store_true",
                     help="timing and progress on stderr")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="classify, chunk, and order files, print the plan, and "
+                         "exit 0 — makes NO model calls")
     args = ap.parse_args()
     _VERBOSE = args.verbose
 
@@ -975,9 +1442,8 @@ def main():
         print("No diff content to scan.", file=sys.stderr)
         return 0
 
-    # File-aware chunking: split on file boundaries, greedy-pack whole files into
-    # per-call budgets (high-risk files first), and scan each chunk on its own —
-    # replacing the old truncate-and-floor of the tail.
+    # Split on file boundaries so each file can be classified, chunked per tier,
+    # and scanned on its own (tiering + packing happen below).
     files = split_by_file(hunks)
     if not files:                               # defensive: hunks with no file header
         files = [("unknown", hunks)]
@@ -989,11 +1455,12 @@ def main():
         log("prompt-injection markers found in diff; score will be floored",
             force=True)
 
-    # Four-state classification BEFORE packing: pull vendored/generated junk
+    # Four-state classification BEFORE tiering: pull vendored/generated junk
     # (EXCLUDED, no floor) and lockfiles (regex-scanned, never to the model) out
     # of the model's workload, and collect deterministic findings. Only `to_scan`
-    # reaches the model. See detector/filters.py for the SCAN/DETERMINISTIC/
-    # EXCLUDED/UNSCANNED split.
+    # is then tiered by classify_file (tier3 is skipped; tier1/tier2 reach the
+    # model). See detector/filters.py for the SCAN/DETERMINISTIC/EXCLUDED/
+    # UNSCANNED split.
     to_scan, determ_findings, excluded_paths, lockfile_paths = filters.classify(files)
     log(f"classify: scan={len(to_scan)} excluded={len(excluded_paths)} "
         f"lockfiles={len(lockfile_paths)} determ_findings={len(determ_findings)}")
@@ -1012,51 +1479,79 @@ def main():
         log(f"bootstrap: {bootstrap_total} scannable files; scanning "
             f"{len(to_scan)} CI/executable surfaces only", force=True)
 
-    chunks, overflow_files, truncated_files = pack(to_scan, MAX_CHARS, MAX_CHUNKS)
-    files_scanned = sum(len(paths) for _text, paths in chunks)
-    num_chunks = len(chunks)
-    log(f"model={MODEL} files={len(files)} chunks={num_chunks} "
+    # Stage 2: tier every scannable file by INTENT (executable logic vs static
+    # config vs inert). classify_file never raises (its own guard floors to
+    # tier1), so an unclassifiable file is always scanned, never skipped.
+    tier_files = {"tier1": [], "tier2": [], "tier3": []}
+    signal_paths = set()                        # files whose diff carries a signal
+    for path, fdiff in to_scan:
+        if _has_signal(fdiff):
+            signal_paths.add(path)
+        tier_files[classify_file(path, fdiff)].append((path, fdiff))
+    log(f"tiers: tier1={len(tier_files['tier1'])} "
+        f"tier2={len(tier_files['tier2'])} tier3={len(tier_files['tier3'])}")
+
+    # Chunk PER TIER (never mix tiers in one chunk) under the SAME MAX_CHARS
+    # budget, then lift signal-bearing chunks to the front of their tier.
+    t1_chunks, t1_overflow, t1_trunc, t1_toolarge = pack(
+        tier_files["tier1"], MAX_CHARS, MAX_CHUNKS)
+    t2_chunks, t2_overflow, t2_trunc, t2_toolarge = pack(
+        tier_files["tier2"], MAX_CHARS, MAX_CHUNKS)
+    t1_chunks = order_chunks_by_signal(t1_chunks, signal_paths)
+    t2_chunks = order_chunks_by_signal(t2_chunks, signal_paths)
+    tier_chunks = {"tier1": t1_chunks, "tier2": t2_chunks}
+
+    # Single files too large to scan at all (bullet 4) — refused by pack(), never
+    # sent to the model, floored to review below.
+    too_large_files = t1_toolarge + t2_toolarge
+
+    # --dry-run: print the plan and stop BEFORE any model call.
+    if args.dry_run:
+        print_dry_run(tier_files, tier_chunks, signal_paths, {
+            "excluded": excluded_paths, "lockfiles": lockfile_paths,
+            "determ_findings": determ_findings, "binary": binary_paths,
+            "bootstrap": bootstrap, "injection": injection,
+            "too_large": too_large_files,
+        })
+        return 0
+
+    # PHASE 1 — all tier1 (executable logic) chunks to completion; no wall-clock
+    # ceiling but the CI job's own timeout. PHASE 2 — tier2 (static config) chunks
+    # against whatever of SCAN_MAX_SECONDS phase 1 left, flooring any chunk that
+    # can't be expected to finish in the remaining budget. `durations` is shared
+    # so phase 2's estimate learns from phase 1's completed chunks.
+    durations = []
+    deadline = _START + MAX_SECONDS
+    p1_start = time.monotonic()
+    p1_outcomes, _p1_budget = scan_tier(t1_chunks, "tier1", system, None, durations)
+    phase1_elapsed = time.monotonic() - p1_start
+    p2_start = time.monotonic()
+    p2_outcomes, budget_floored = scan_tier(t2_chunks, "tier2", system, deadline,
+                                            durations)
+    phase2_elapsed = time.monotonic() - p2_start
+    outcomes = p1_outcomes + p2_outcomes
+
+    overflow_files = t1_overflow + t2_overflow
+    truncated_files = t1_trunc + t2_trunc
+    # Phase-2 budget-floored files are UNSCANNED for budget reasons, exactly like
+    # pack overflow — fold them in so the verdict floors and the comment lists
+    # them under "Unscanned (ran out of budget)".
+    overflow_files = overflow_files + budget_floored
+
+    # Files in chunks we refused to send because they exceed the context cap
+    # (bullet 2). UNSCANNED — floored to review below, never counted as scanned.
+    context_files = [p for o in outcomes if o["status"] == "context"
+                     for p in o["paths"]]
+
+    # Chunks that actually reached the model (ok or errored); budget-skipped and
+    # context-refused chunks never became a call.
+    attempted = [o for o in outcomes if o["status"] in ("ok", "infra", "content")]
+    files_scanned = sum(len(o["paths"]) for o in attempted)
+    num_chunks = len(attempted)
+    log(f"model={MODEL} tier1_chunks={len(t1_chunks)} tier2_chunks={len(t2_chunks)} "
         f"scanned={files_scanned} overflow={len(overflow_files)} "
-        f"truncated={len(truncated_files)}")
-
-    outcomes = []                               # per-chunk: status/result/paths
-    for i, (text, paths) in enumerate(chunks):
-        # Wall-clock budget: if we're out of time, leave the remaining chunks
-        # UNSCANNED (they floor to review — same as budget overflow) rather than
-        # blow the CI job's own timeout. Checked BEFORE the call so a slow model
-        # can't overrun by one full REQUEST_TIMEOUT past the budget.
-        if time.monotonic() - _START >= MAX_SECONDS:
-            remaining = [p for _t, ps in chunks[i:] for p in ps]
-            overflow_files.extend(remaining)
-            log(f"MAX_SECONDS={MAX_SECONDS}s budget reached after {i} chunks; "
-                f"{len(remaining)} files left unscanned (floor to review)",
-                force=True)
-            break
-        log(f"chunk {i + 1}/{len(chunks)} files={len(paths)} chars={len(text)}")
-        try:
-            res = review_chunk(text, system)
-        except InfraError as exc:
-            outcomes.append({"status": "infra", "result": None, "paths": paths})
-            # Loud, machine-parseable line so the workflow can route to Slack/alerts.
-            log(f"FAILSAFE kind=infra chunk={i + 1} fail_closed={FAIL_CLOSED} "
-                f"detail={exc}", force=True)
-        except ContentError as exc:
-            outcomes.append({"status": "content", "result": None, "paths": paths})
-            log(f"FAILSAFE kind=content chunk={i + 1} fail_closed={FAIL_CLOSED} "
-                f"detail={exc}", force=True)
-        else:
-            # A would-be block gets one independent second look before it can
-            # block the PR (demotes to review on disagreement, keeps block on a
-            # failed second call). Runs before the single-chunk verbatim path and
-            # the aggregate max(), so both reduce paths see the demoted score.
-            if CORROBORATE and res["risk_score"] >= BLOCK:
-                res = corroborate(res, text, system)
-            outcomes.append({"status": "ok", "result": res, "paths": paths})
-
-    # Recompute from ATTEMPTED chunks: an early MAX_SECONDS break leaves the
-    # pre-loop totals overcounting (unreached chunks became overflow_files above).
-    files_scanned = sum(len(o["paths"]) for o in outcomes)
-    num_chunks = len(outcomes)
+        f"truncated={len(truncated_files)} budget_floored={len(budget_floored)} "
+        f"too_large={len(too_large_files)} context_refused={len(context_files)}")
 
     # Reduce: one successful chunk is used verbatim (its result IS the final
     # result); otherwise merge deterministically, optionally rewriting the
@@ -1092,6 +1587,21 @@ def main():
             seen.add(key)
             result["suspicious_findings"].append(f)
 
+    # Stage 3: files we REFUSED to scan (a lone file too large for automated scan,
+    # or a chunk that would exceed the context cap) are UNSCANNED. Fail closed —
+    # name each with a finding and floor the verdict to review below; they must
+    # never pass silently as "reviewed".
+    refused_findings = (
+        [{"file": p, "reason": "diff too large for automated scan"}
+         for p in too_large_files]
+        + [{"file": p, "reason": "chunk exceeds context"}
+           for p in context_files])
+    for f in refused_findings:
+        key = (f["file"], f["reason"].strip().lower())
+        if key not in seen:
+            seen.add(key)
+            result["suspicious_findings"].append(f)
+
     if injection:                               # floor regardless of the model's score
         apply_injection_floor(result, INJECTION_FLOOR)
 
@@ -1108,6 +1618,8 @@ def main():
         verdict = escalate(verdict, "block" if FAIL_CLOSED else "review")
     if overflow_files or truncated_files:       # partially scanned -> never a clean pass
         verdict = escalate(verdict, "review")
+    if too_large_files or context_files:        # refused to scan -> never a clean pass
+        verdict = escalate(verdict, "review")
     if binary_paths:                            # binary bytes never reached the model
         verdict = escalate(verdict, "review")
     if determ_findings:                         # a real supply-chain finding, no score
@@ -1115,12 +1627,39 @@ def main():
     if bootstrap:                               # initial import -> manual sign-off
         verdict = escalate(verdict, "review")
 
+    skipped_paths = [p for p, _d in tier_files["tier3"]]
     coverage = {"files_scanned": files_scanned, "num_chunks": num_chunks,
                 "overflow": overflow_files, "truncated": truncated_files,
                 "binary": binary_paths, "excluded": excluded_paths,
-                "lockfiles": lockfile_paths}
+                "lockfiles": lockfile_paths, "skipped": skipped_paths,
+                "too_large": too_large_files, "context": context_files}
     if bootstrap:
         coverage["bootstrap"] = {"total": bootstrap_total}
+
+    # Plain-text run summary on stderr (stdout stays the JSON contract). Truncated
+    # files were scanned (partially), so they count as scanned, not floored.
+    def _count(status, tier):
+        return sum(len(o["paths"]) for o in outcomes
+                   if o["tier"] == tier and o["status"] == status)
+    tier_stats = {
+        "tier1": (_count("ok", "tier1"),
+                  _count("infra", "tier1") + _count("content", "tier1")
+                  + _count("context", "tier1") + len(t1_overflow)
+                  + len(t1_toolarge), 0),
+        "tier2": (_count("ok", "tier2"),
+                  _count("infra", "tier2") + _count("content", "tier2")
+                  + _count("context", "tier2") + _count("budget", "tier2")
+                  + len(t2_overflow) + len(t2_toolarge), 0),
+        "tier3": (0, 0, len(skipped_paths)),
+    }
+    floored_error = [(p, o["status"]) for o in outcomes
+                     if o["status"] in ("infra", "content", "context")
+                     for p in o["paths"]]
+    total_elapsed = time.monotonic() - _START
+    print_run_summary(verdict, tier_stats, overflow_files, floored_error,
+                      truncated_files, skipped_paths, phase1_elapsed,
+                      phase2_elapsed, total_elapsed, too_large_files)
+
     return emit(result, verdict, failsafe, injection, coverage, scored)
 
 
