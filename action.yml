@@ -132,26 +132,89 @@ runs:
 
     - name: Post sticky PR comment
       if: ${{ always() && github.event_name == 'pull_request' && inputs.comment == 'true' }}
+      # FAIL-OPEN FOR THE COMMENT ONLY: a broken comment must never fail the job.
+      # The pass/fail verdict is enforced entirely by the separate "Run intent gate"
+      # step (scan.py exits 1 on 'block'), so continue-on-error here keeps a
+      # malicious PR failing while ensuring a comment glitch can't block a clean one.
+      continue-on-error: true
       shell: bash
       env:
+        # HTTP via curl to github.api_url (NOT `gh`): on a self-hosted GHES runner
+        # `gh` may be absent, and even when present it defaults to api.github.com
+        # unless GH_HOST is set — so a GHES token 404s and no comment posts. curl
+        # and python3 are both already used on this runner (setup step / the gate),
+        # and github.api_url resolves to the correct GHES API host. python3 (stdlib)
+        # does the JSON so we depend on neither `gh` nor `jq`.
+        # ${{ github.* }} is read into env here (the safe place in a composite
+        # action) and used from the script below, never interpolated into run:.
+        API_URL: ${{ github.api_url }}
         GH_TOKEN: ${{ github.token }}
         PR: ${{ github.event.pull_request.number }}
         REPO: ${{ github.repository }}
       run: |
-        # Sticky comment: find a previous comment whose body starts with the
-        # hidden marker (written by scan.py as comment.md's first line) and
-        # PATCH it; otherwise create a new one.
+        # Never let a comment failure fail the step (belt with continue-on-error).
+        set +e
         if [ ! -f comment.md ]; then
           echo "no comment.md produced; skipping PR comment"
           exit 0
         fi
+        echo "Posting PR comment via $API_URL (repo=$REPO pr=$PR)"
         marker='<!-- intent-gate-comment -->'
-        prev=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-               --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -n1)
+        auth="Authorization: token $GH_TOKEN"
+        accept="Accept: application/vnd.github+json"
+        ctype="Content-Type: application/json"
+
+        # Build the JSON request body from comment.md, truncating to GitHub's
+        # 65536-char comment cap. Keep the HEAD (the marker on line 1 + verdict +
+        # counts) and cut the tail, so sticky-matching on the marker still works.
+        python3 - <<'PY'
+        import json
+        body = open("comment.md", encoding="utf-8").read()
+        CAP = 65000                              # headroom under GitHub's 65536
+        if len(body) > CAP:
+            body = body[:CAP] + "\n\n_…comment truncated (exceeded GitHub's size limit)._\n"
+        json.dump({"body": body}, open("payload.json", "w", encoding="utf-8"))
+        PY
+
+        # Find an existing sticky comment: page through issue comments (curl to
+        # a file) and let python3 (stdlib json) return the id of the first whose
+        # body starts with the marker — no jq. Stop at the first short page. The
+        # heredoc body is at the run-block base indent so python sees it at col 0.
+        prev=""
+        page=1
+        while [ -z "$prev" ]; do
+          curl -sf -H "$auth" -H "$accept" \
+            "$API_URL/repos/$REPO/issues/$PR/comments?per_page=100&page=$page" \
+            > comments.json || break
+          out=$(MARKER="$marker" python3 - <<'PY'
+        import json, os
+        try:
+            cs = json.load(open("comments.json", encoding="utf-8"))
+        except Exception:
+            cs = []
+        m = os.environ["MARKER"]
+        cid = next((str(c["id"]) for c in cs if (c.get("body") or "").startswith(m)), "")
+        print(cid)
+        print(len(cs))
+        PY
+        )
+          prev=$(printf '%s\n' "$out" | sed -n 1p)
+          count=$(printf '%s\n' "$out" | sed -n 2p)
+          [ -n "$prev" ] && break
+          [ "${count:-0}" -lt 100 ] && break     # last page reached, marker not found
+          page=$((page + 1))
+        done
+
         if [ -n "$prev" ]; then
-          gh api -X PATCH "repos/$REPO/issues/comments/$prev" -F body=@comment.md >/dev/null
-          echo "updated existing sticky comment $prev"
+          curl -sf -X PATCH -H "$auth" -H "$accept" -H "$ctype" \
+            --data-binary @payload.json \
+            "$API_URL/repos/$REPO/issues/comments/$prev" >/dev/null \
+            && echo "updated sticky comment $prev" \
+            || echo "PATCH comment failed (non-fatal)"
         else
-          gh api "repos/$REPO/issues/$PR/comments" -F body=@comment.md >/dev/null
-          echo "created new sticky comment"
+          curl -sf -X POST -H "$auth" -H "$accept" -H "$ctype" \
+            --data-binary @payload.json \
+            "$API_URL/repos/$REPO/issues/$PR/comments" >/dev/null \
+            && echo "created sticky comment" \
+            || echo "POST comment failed (non-fatal)"
         fi
