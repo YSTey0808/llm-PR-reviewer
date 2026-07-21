@@ -22,6 +22,7 @@ Run:  python tests/unit/test_corroborate_units.py -v
 
 import importlib.util
 import os
+import sys
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -29,7 +30,9 @@ TESTS = os.path.dirname(HERE)
 ROOT = os.path.dirname(TESTS)
 SCAN = os.path.join(ROOT, "detector", "scan.py")
 
-# Load scan.py by path (no package/__init__.py) for the pure-helper unit tests.
+# Load scan.py by path (no package/__init__.py) for the pure-helper unit tests;
+# detector/ on sys.path so scan.py's own `import filters` resolves.
+sys.path.insert(0, os.path.join(ROOT, "detector"))
 _spec = importlib.util.spec_from_file_location("scan", SCAN)
 scan = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(scan)

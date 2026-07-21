@@ -121,9 +121,12 @@ class TestFailSafes(unittest.TestCase):
 
 class TestInjectionFixture(unittest.TestCase):
     def test_injection_marker_floors_score(self):
+        # The marker lives in an ordinary (non-exempt) path, so the tripwire
+        # fires. Markers inside the detector's own samples/tests/prompts are
+        # exempt — that exemption is covered in tests/unit/test_corroborate_units.
         with FakeOllama() as fake:
             fake.respond([{"risk_score": 0}])           # model says benign...
-            result, _ = run_scan(fake.url, "injection_in_sample.diff")
+            result, _ = run_scan(fake.url, "injection_marker.diff")
         self.assertTrue(result["injection"])            # ...but the tripwire fires
         self.assertGreaterEqual(result["score"], 55)    # floored to INJECTION_FLOOR
 

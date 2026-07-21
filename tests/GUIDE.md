@@ -115,7 +115,7 @@ Small, hand-written unified diffs, each capturing a diff **shape**:
 | `new_exec.diff` | New file with `new file mode 100755` and a small hunk. |
 | `lockfile_evil.diff` | `package-lock.json` with a `resolved` URL to a non-npm host; `package.json` untouched. |
 | `lockfile_clean.diff` | `package-lock.json` + `package.json` both changed, all URLs `registry.npmjs.org`. |
-| `injection_in_sample.diff` | Adds `ignore previous instructions` inside `samples/malicious/` (trips the injection tripwire). |
+| `injection_marker.diff` | Adds `ignore previous instructions` in an ordinary path (`src/util.py`) — trips the injection tripwire. Markers inside `samples/`/`tests/`/`prompts/` are exempt. |
 | `dist_only.diff` | `dist/bundle.js` changed, no `src/` change. |
 
 **Current behaviour these pin (before any detector change):** `extract_hunks`

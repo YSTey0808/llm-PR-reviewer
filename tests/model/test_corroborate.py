@@ -32,7 +32,9 @@ SCAN = os.path.join(ROOT, "detector", "scan.py")
 PROMPT = os.path.join(ROOT, "prompts", "intent.md")
 FIXTURES = os.path.join(TESTS, "fixtures")
 
-# Load scan.py by path (no package/__init__.py) for the module's REVIEW band.
+# Load scan.py by path (no package/__init__.py) for the module's REVIEW band;
+# detector/ on sys.path so scan.py's own `import filters` resolves.
+sys.path.insert(0, os.path.join(ROOT, "detector"))
 _spec = importlib.util.spec_from_file_location("scan", SCAN)
 scan = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(scan)
