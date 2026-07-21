@@ -80,7 +80,10 @@ check("coerce valid key_changes", _r and _r["key_changes"] == ["added exfil call
 
 check("coerce clamps high", scan.coerce_result('{"risk_score": 150}')["risk_score"] == 100)
 check("coerce clamps low", scan.coerce_result('{"risk_score": -5}')["risk_score"] == 0)
-check("coerce non-int score -> 0", scan.coerce_result('{"risk_score": "NaN"}')["risk_score"] == 0)
+# A missing / non-numeric risk_score is now distrusted (-> None -> ContentError),
+# not defaulted to 0 (which read as a clean pass — a fail-open bug).
+check("coerce non-int score -> None", scan.coerce_result('{"risk_score": "NaN"}') is None)
+check("coerce missing score -> None", scan.coerce_result('{"reasoning": "x"}') is None)
 
 _embed = scan.coerce_result('Sure, here you go: {"risk_score": 42} hope that helps')
 check("coerce extracts embedded json", _embed is not None and _embed["risk_score"] == 42)

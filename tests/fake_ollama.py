@@ -72,8 +72,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_envelope(BENIGN_RESULT)
         elif mode == "http_error":
             self._send_json(payload, {"error": "fake server error"})
-        elif mode == "garbage":
-            # 200 OK, but the model "content" is not JSON -> ContentError.
+        elif mode in ("garbage", "raw"):
+            # 200 OK with a verbatim `content` string — non-JSON (garbage) or a
+            # caller-chosen JSON string (raw), e.g. valid JSON missing a field.
             self._send_envelope_raw(payload)
         else:                                        # "respond" / "echo"
             self._send_envelope(payload)
@@ -156,6 +157,12 @@ class FakeOllama:
     def garbage(self):
         """Reply 200 with non-JSON content -> drives ContentError in scan.py."""
         self._set("garbage", ["this is not json at all -- {broken"])
+
+    def raw(self, list_of_strings):
+        """Reply 200 with each given string as the model `content`, VERBATIM (no
+        benign-default merge). Use to script replies that are valid JSON but
+        missing/wrong fields — e.g. `['{"reasoning": "x"}']` (no risk_score)."""
+        self._set("raw", list(list_of_strings) or [""])
 
     def http_error(self, code=500):
         """Reply with an HTTP error status -> drives InfraError in scan.py."""
