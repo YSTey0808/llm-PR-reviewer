@@ -5,13 +5,13 @@ No Ollama, no network, no model — these test the deterministic plumbing
 (sanitize, hunk extraction, injection tripwire, verdict banding, fail-safe
 escalation, reply parsing). Stdlib only, matching the detector itself.
 
-Run:  python3 tests/test_units.py     (exit 0 = all pass, 1 = failure)
+Run:  python3 tests/unit/test_units.py     (exit 0 = all pass, 1 = failure)
 """
 import json
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "detector"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "detector"))
 import scan  # noqa: E402
 
 _FAILS = []
@@ -24,8 +24,8 @@ def check(name, cond):
 
 
 # ---- sanitize: NFKC + zero-width stripping -------------------------------
-check("sanitize strips zero-width", scan.sanitize("a\u200bb\u200cc") == "abc")
-check("sanitize NFKC folds fullwidth", scan.sanitize("\uff21\uff22") == "AB")
+check("sanitize strips zero-width", scan.sanitize("a​b‌c") == "abc")
+check("sanitize NFKC folds fullwidth", scan.sanitize("ＡＢ") == "AB")
 
 # ---- extract_hunks: keep hunks, drop git noise ---------------------------
 _diff = (

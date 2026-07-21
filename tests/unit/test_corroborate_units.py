@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Tests for four robustness fixes in detector/scan.py (stdlib unittest + the
-in-process FakeOllama; no real model or network).
+"""Pure-function unit tests split out of the corroboration robustness suite
+(stdlib unittest only — no model, network, or subprocess).
 
-  CHANGE 1  corroborate(): a would-be block (chunk score >= BLOCK) gets ONE
-            second independent review before it can block. Disagreement demotes
-            to review (never pass); a failed second call KEEPS the block.
+Covers three of the four robustness fixes in isolation; the end-to-end half of
+CHANGE 1 (the full corroborate loop driven through scan.py) lives in
+tests/model/test_corroborate.py.
+
+  CHANGE 1  corroborate() in isolation: a would-be block that a disagreeing
+            second review demotes to review (never pass); a failed second call
+            KEEPS the block.
   CHANGE 2  detect_injection(): the tripwire is checked per file, skipping the
             detector's own prompts/fixtures/samples so self-maintenance PRs don't
             self-trip — but a real injected diff elsewhere still floors.
@@ -13,34 +17,25 @@ in-process FakeOllama; no real model or network).
   CHANGE 4  FAIL_SAFE is clamped to ("review","block"); "pass" (which would
             silently disable the fail-safe) coerces to "review".
 
-Run:  python tests/test_corroborate.py -v
+Run:  python tests/unit/test_corroborate_units.py -v
 """
 
 import importlib.util
-import json
 import os
-import subprocess
 import sys
-import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-sys.path.insert(0, HERE)
-from fake_ollama import FakeOllama  # noqa: E402
-
+TESTS = os.path.dirname(HERE)
+ROOT = os.path.dirname(TESTS)
 SCAN = os.path.join(ROOT, "detector", "scan.py")
-PROMPT = os.path.join(ROOT, "prompts", "intent.md")
-FIXTURES = os.path.join(HERE, "fixtures")
 
-# Load scan.py by path (no package/__init__.py) for the pure-helper unit tests.
+# Load scan.py by path (no package/__init__.py) for the pure-helper unit tests;
+# detector/ on sys.path so scan.py's own `import filters` resolves.
+sys.path.insert(0, os.path.join(ROOT, "detector"))
 _spec = importlib.util.spec_from_file_location("scan", SCAN)
 scan = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(scan)
-
-
-def fx(name):
-    return os.path.join(FIXTURES, name)
 
 
 def load_scan_with_env(**overrides):
@@ -58,84 +53,7 @@ def load_scan_with_env(**overrides):
     return mod
 
 
-def run_scan(args, cwd=ROOT, env_extra=None):
-    """Run scan.py end-to-end, returning (json_or_None, proc, comment).
-
-    RETRIES=1/RETRY_BACKOFF=0 so one request maps to one model call — the initial
-    review and the corroboration second call are then exactly one request each.
-    """
-    fd, comment_path = tempfile.mkstemp(suffix=".md")
-    os.close(fd)
-    env = dict(os.environ)
-    env.update({
-        "PROMPT_FILE": PROMPT,
-        "COMMENT_FILE": comment_path,
-        "RETRIES": "1",
-        "RETRY_BACKOFF": "0",
-        "REQUEST_TIMEOUT": "5",
-    })
-    if env_extra:
-        env.update(env_extra)
-    try:
-        proc = subprocess.run([sys.executable, SCAN, *args], cwd=cwd, env=env,
-                              capture_output=True, text=True, timeout=60)
-        try:
-            with open(comment_path, encoding="utf-8") as fh:
-                comment = fh.read()
-        except OSError:
-            comment = ""
-    finally:
-        try:
-            os.unlink(comment_path)
-        except OSError:
-            pass
-    try:
-        data = json.loads(proc.stdout)
-    except ValueError:
-        data = None
-    return data, proc, comment
-
-
-# ---- CHANGE 1: corroborate a would-be block --------------------------------
-
-class TestCorroborateEndToEnd(unittest.TestCase):
-    """Full loop: one chunk scores >= BLOCK, corroboration fires on the second
-    request. Uses a single-file fixture so there is exactly one chunk."""
-
-    def test_disagreement_demotes_block_to_review(self):
-        with FakeOllama() as fake:
-            fake.respond([{"risk_score": 85}, {"risk_score": 20}])  # [85, 20]
-            data, proc, _ = run_scan(
-                ["--diff", fx("lockfile_clean.diff")],
-                env_extra={"OLLAMA_URL": fake.url})
-        self.assertIsNotNone(data, f"stdout not JSON: {proc.stdout!r} / {proc.stderr!r}")
-        self.assertEqual(data["verdict"], "review")             # demoted, not block
-        self.assertEqual(data["score"], scan.REVIEW)            # max(REVIEW, 20)
-        self.assertEqual(len(fake.requests), 2)                 # corroboration fired
-        self.assertEqual(proc.returncode, 0)
-
-    def test_agreement_keeps_block(self):
-        with FakeOllama() as fake:
-            fake.respond([{"risk_score": 85}, {"risk_score": 85}])  # [85, 85]
-            data, proc, _ = run_scan(
-                ["--diff", fx("lockfile_clean.diff")],
-                env_extra={"OLLAMA_URL": fake.url})
-        self.assertIsNotNone(data, f"stdout not JSON: {proc.stdout!r} / {proc.stderr!r}")
-        self.assertEqual(data["verdict"], "block")              # corroborated
-        self.assertEqual(data["score"], 85)
-        self.assertEqual(len(fake.requests), 2)
-        self.assertEqual(proc.returncode, 1)                    # block -> non-zero
-
-    def test_below_block_does_not_corroborate(self):
-        with FakeOllama() as fake:
-            fake.respond([{"risk_score": 30}])                  # [30] < BLOCK
-            data, proc, _ = run_scan(
-                ["--diff", fx("lockfile_clean.diff")],
-                env_extra={"OLLAMA_URL": fake.url})
-        self.assertIsNotNone(data, f"stdout not JSON: {proc.stdout!r} / {proc.stderr!r}")
-        self.assertEqual(len(fake.requests), 1)                 # exactly one call
-        self.assertEqual(data["score"], 30)
-
+# ---- CHANGE 1: corroborate() failure paths in isolation --------------------
 
 class TestCorroborateUnit(unittest.TestCase):
     """corroborate() in isolation, driving the second call's outcome directly so

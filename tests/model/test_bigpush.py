@@ -9,8 +9,8 @@ sent to the model. That lets each test assert BOTH the verdict/coverage AND whic
 files did (or must never) reach the model.
 
 Run (the human runs this; the assistant does not):
-    python -m pytest tests/test_bigpush.py -q
-    python -m unittest tests.test_bigpush -v
+    python -m pytest tests/model/test_bigpush.py -q
+    python -m unittest tests.model.test_bigpush -v
 """
 
 import io
@@ -22,7 +22,8 @@ import unittest
 from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
+TESTS = os.path.dirname(HERE)
+ROOT = os.path.dirname(TESTS)
 sys.path.insert(0, os.path.join(ROOT, "detector"))
 
 import scan            # noqa: E402

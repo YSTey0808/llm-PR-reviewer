@@ -3,8 +3,13 @@
     "allow": [
       "PowerShell($env:MODEL=\"qwen2.5-coder:3b\"; python detector\\\\scan.py --diff samples\\\\benign\\\\add.diff 2>$null)",
       "PowerShell($env:MODEL=\"qwen2.5-coder:3b\"; python detector\\\\scan.py --diff samples\\\\benign\\\\refactor_rename.diff 2>$null)",
-      "Bash(python tests/test_scan.py -v)",
-      "Bash(python tests/unit_test.py)",
+      "Bash(python tests/run_tests.py)",
+      "Bash(python tests/run_tests.py --unit)",
+      "Bash(python tests/run_tests.py --model)",
+      "Bash(python tests/unit/test_scan.py -v)",
+      "Bash(python tests/unit/test_units.py)",
+      "Bash(python tests/unit/test_failopen_units.py -v)",
+      "Bash(python tests/unit/test_corroborate_units.py -v)",
       "Bash(python - C:/Users/yeesi/AppData/Local/Temp/claude/c--Github-llm-PR-reviewer-llm-PR-reviewer/d67fa049-db95-4b34-a8a1-1128db8d97c6/scratchpad/multi.diff)",
       "Bash(MAX_CHARS=200 MAX_CHUNKS=3 OLLAMA_URL=http://localhost:1 RETRIES=1 REQUEST_TIMEOUT=2 python detector/scan.py --diff C:/Users/yeesi/AppData/Local/Temp/claude/c--Github-llm-PR-reviewer-llm-PR-reviewer/d67fa049-db95-4b34-a8a1-1128db8d97c6/scratchpad/multi.diff --verbose)",
       "Bash(echo \"exit=$?\")",
@@ -16,9 +21,12 @@
       "Bash(python -c \"import ast,re; print\\('yaml module missing; doing basic check'\\)\")",
       "Bash(python -c \"import yaml; d=yaml.safe_load\\(open\\('.github/workflows/gate.yml',encoding='utf-8'\\)\\); j=d['jobs']['scan']; print\\('permissions:', j['permissions']\\); print\\('checkout:', j['steps'][0]['uses']\\); print\\('gate inputs:', list\\(j['steps'][1]['with'].keys\\(\\)\\)\\)\")",
       "Bash(git check-ignore *)",
-      "Bash(python tests/test_harness.py -v)",
-      "Bash(python tests/test_harness.py)",
-      "Bash(python tests/test_scan.py)"
+      "Bash(python tests/model/test_harness.py -v)",
+      "Bash(python tests/model/test_harness.py)",
+      "Bash(python tests/model/test_failopen.py -v)",
+      "Bash(python tests/model/test_corroborate.py -v)",
+      "Bash(python tests/model/test_bigpush.py -v)",
+      "Bash(git checkout *)"
     ]
   }
 }

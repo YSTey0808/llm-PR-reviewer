@@ -2,7 +2,7 @@
 """
 Contamination check for the eval set (Python standard library only).
 
-The eval in tests/eval.py is only meaningful if the system prompt does NOT
+The eval in tests/eval/eval.py is only meaningful if the system prompt does NOT
 contain the answers. It is easy to "improve accuracy" by writing each sample's
 scenario and expected score straight into prompts/intent.md — then the model is
 recalling the key, not judging the diff. This test makes that failure LOUD: it
@@ -26,14 +26,15 @@ scenario-level leaks phrased purely in generic vocabulary are out of its reach.
 This is a test: it fails toward "contaminated" (exit 1), never silently green.
 
 Run:
-  python3 tests/check_contamination.py
+  python3 tests/eval/check_contamination.py
 """
 
 import os
 import re
 import sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# tests/eval/ -> tests/ -> repo root
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SAMPLES = os.path.join(ROOT, "samples")
 PROMPT = os.path.join(ROOT, "prompts", "intent.md")
 

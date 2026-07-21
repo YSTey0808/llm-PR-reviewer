@@ -15,10 +15,12 @@ deterministic, so repeating a scan measures nothing; determinism is not
 calibration. A verdict that FLIPS under a semantics-preserving edit (rename a
 variable, insert a blank line, reorder two hunks) is the real robustness signal.
 
+Requires a real Ollama; this is NOT part of the offline suite (tests/run_tests.py).
+
 Usage:
-  python3 tests/eval.py
-  python3 tests/eval.py --perturb                  # + robustness (more model calls)
-  MODEL=qwen2.5-coder:7b python3 tests/eval.py      # try a bigger model
+  python3 tests/eval/eval.py
+  python3 tests/eval/eval.py --perturb                  # + robustness (more model calls)
+  MODEL=qwen2.5-coder:7b python3 tests/eval/eval.py      # try a bigger model
 """
 
 import argparse
@@ -30,7 +32,8 @@ import sys
 import tempfile
 from collections import Counter
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# tests/eval/ -> tests/ -> repo root
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SAMPLES = os.path.join(ROOT, "samples")
 SCAN = os.path.join(ROOT, "detector", "scan.py")
 
