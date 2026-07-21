@@ -12,13 +12,13 @@ NOT silently pass:
          because extract_hunks drops their metadata.
   BUG 3  a reply missing / with a non-numeric risk_score must be distrusted
          (ContentError -> review), not defaulted to score 0 -> pass.
-  BUG 4  fit_max_chars derives a char budget that fits NUM_CTX, and main() clamps
-         MAX_CHARS down to it (so Ollama can't silently truncate the prompt).
+  BUG 4  main() clamps MAX_CHARS down to a NUM_CTX-derived budget (so Ollama
+         can't silently truncate the prompt). The pure fit_max_chars helper is
+         covered in tests/unit/test_failopen_units.py.
 
-Run:  python tests/test_failopen.py -v
+Run:  python tests/model/test_failopen.py -v
 """
 
-import importlib.util
 import json
 import os
 import subprocess
@@ -27,18 +27,14 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-sys.path.insert(0, HERE)
+TESTS = os.path.dirname(HERE)
+ROOT = os.path.dirname(TESTS)
+sys.path.insert(0, os.path.join(TESTS, "support"))
 from fake_ollama import FakeOllama  # noqa: E402
 
 SCAN = os.path.join(ROOT, "detector", "scan.py")
 PROMPT = os.path.join(ROOT, "prompts", "intent.md")
-FIXTURES = os.path.join(HERE, "fixtures")
-
-# Load scan.py by path (no package/__init__.py) for the fit_max_chars unit test.
-_spec = importlib.util.spec_from_file_location("scan", SCAN)
-scan = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(scan)
+FIXTURES = os.path.join(TESTS, "fixtures")
 
 
 def fx(name):
@@ -187,18 +183,9 @@ class TestBrokenReply(unittest.TestCase):
         self.assertEqual(data["verdict"], "review")
 
 
-# ---- BUG 4: MAX_CHARS must be derived to fit NUM_CTX -------------------------
+# ---- BUG 4: main() clamps MAX_CHARS down to fit NUM_CTX ----------------------
 
-class TestFitMaxChars(unittest.TestCase):
-    def test_budget_is_positive_and_well_under_default_max_chars(self):
-        budget = scan.fit_max_chars("x" * 4800, 4096, 512)
-        self.assertGreater(budget, 0)
-        self.assertLess(budget, 16000)
-
-    def test_raises_when_prompt_and_output_do_not_fit(self):
-        with self.assertRaises(ValueError):
-            scan.fit_max_chars("x" * 100000, 4096, 512)
-
+class TestMaxCharsClamp(unittest.TestCase):
     def test_main_clamps_max_chars_and_logs(self):
         with FakeOllama() as fake:
             fake.respond([{"risk_score": 5}])

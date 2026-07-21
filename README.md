@@ -105,10 +105,10 @@ echo "exit code: $?"     # 1 = block (would fail CI), 0 = pass/review
 
 ### Batch evaluation
 
-[`tests/eval.py`](tests/eval.py) runs the detector over every sample in `samples/` and reports precision / recall / accuracy against the expected labels (folder name = expected outcome):
+[`tests/eval/eval.py`](tests/eval/eval.py) runs the detector over every sample in `samples/` and reports precision / recall / accuracy against the expected labels (folder name = expected outcome):
 
 ```bash
-MODEL=qwen2.5-coder:7b python3 tests/eval.py
+MODEL=qwen2.5-coder:7b python3 tests/eval/eval.py
 ```
 
 ---
@@ -180,5 +180,5 @@ The system prompt in [`prompts/intent.md`](prompts/intent.md) has a **project-co
 | `prompts/intent.md`           | System prompt / rubric handed to the model.          |
 | `action.yml`                  | The composite GitHub Action (Ollama setup, scan, sticky comment). |
 | `.github/workflows/gate.yml`  | This repo's own CI (dogfoods the action).            |
-| `tests/eval.py`               | Batch precision/recall harness over `samples/`.      |
+| `tests/eval/eval.py`          | Batch precision/recall harness over `samples/`.      |
 | `samples/`                    | Labelled example diffs (`benign/`, `malicious/`).    |

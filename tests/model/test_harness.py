@@ -6,9 +6,9 @@ Each test starts an in-process FakeOllama on an ephemeral port, points scan.py's
 OLLAMA_URL at it, runs scan.py as a subprocess against a fixture diff, and
 asserts on the JSON scan.py prints to stdout. This exercises the transport path,
 the retry loop, and both fail-safe branches — the parts the pure-function unit
-tests (test_scan.py / unit_test.py) cannot reach.
+tests (tests/unit/) cannot reach.
 
-Run:  python tests/test_harness.py -v
+Run:  python tests/model/test_harness.py -v
 """
 
 import json
@@ -19,13 +19,14 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-sys.path.insert(0, HERE)
+TESTS = os.path.dirname(HERE)
+ROOT = os.path.dirname(TESTS)
+sys.path.insert(0, os.path.join(TESTS, "support"))
 from fake_ollama import FakeOllama, BENIGN_RESULT  # noqa: E402
 
 SCAN = os.path.join(ROOT, "detector", "scan.py")
 PROMPT = os.path.join(ROOT, "prompts", "intent.md")
-FIXTURES = os.path.join(HERE, "fixtures")
+FIXTURES = os.path.join(TESTS, "fixtures")
 
 
 def run_scan(fake_url, diff_name, request_timeout="2", extra_env=None):

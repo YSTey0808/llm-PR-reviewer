@@ -218,7 +218,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 
-# Generated test fixtures: large diffs produced by tests/make_large_diff.py.
+# Generated test fixtures: large diffs produced by tests/support/make_large_diff.py.
 # The generator script is versioned; its (large, regenerable) output is not.
 # NB: hand-authored fixtures in tests/fixtures/ (and samples/**/*.diff) ARE
 # committed — only the generated large diff is ignored here.

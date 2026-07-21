@@ -2,7 +2,7 @@
 """
 Unit tests for the pure helpers in detector/scan.py (stdlib unittest only).
 Diff parsing, result coercion, verdict mapping, the injection tripwire, and
-markdown rendering — no network or Ollama. Run: python tests/test_scan.py -v
+markdown rendering — no network or Ollama. Run: python tests/unit/test_scan.py -v
 """
 
 import importlib.util
@@ -10,8 +10,8 @@ import os
 import unittest
 
 # Load scan.py by file path (the repo has no package / __init__.py), mirroring
-# how tests/eval.py imports the detector.
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# how tests/eval/eval.py imports the detector.
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _spec = importlib.util.spec_from_file_location(
     "scan", os.path.join(ROOT, "detector", "scan.py"))
 scan = importlib.util.module_from_spec(_spec)

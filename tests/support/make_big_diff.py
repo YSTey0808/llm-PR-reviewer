@@ -3,7 +3,7 @@
 detector/scan.py's chunking / prioritisation path (stdlib only, deterministic —
 no randomness, no network).
 
-Unlike tests/make_large_diff.py (a fixed ~75 KB benign fixture), this is a
+Unlike tests/support/make_large_diff.py (a fixed ~75 KB benign fixture), this is a
 CONFIGURABLE generator modelling the shape of a real "initial commit" of a
 JavaScript/Python repo:
 
@@ -19,9 +19,9 @@ is benign (plain functions, no eval/exec/injection markers) so the harness
 isolates CHUNKING mechanics, not detection scoring.
 
 Usage:
-  python tests/make_big_diff.py                     # 500 files -> stdout
-  python tests/make_big_diff.py out.diff            # 500 files -> out.diff
-  python tests/make_big_diff.py --files 50 out.diff  # 50 files -> out.diff
+  python tests/support/make_big_diff.py                     # 500 files -> stdout
+  python tests/support/make_big_diff.py out.diff            # 500 files -> out.diff
+  python tests/support/make_big_diff.py --files 50 out.diff  # 50 files -> out.diff
 """
 import argparse
 import sys
@@ -29,7 +29,7 @@ import sys
 
 def _new_file(path, lines):
     """A whole-file add: `diff --git` header + one `@@` hunk, all `+` lines.
-    Mirrors the header style in tests/make_large_diff.py."""
+    Mirrors the header style in tests/support/make_large_diff.py."""
     added = len(lines)
     header = (
         f"diff --git a/{path} b/{path}\n"

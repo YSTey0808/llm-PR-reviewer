@@ -15,14 +15,15 @@ Content is deliberately benign (plain functions, no eval/exec/base64/injection
 markers) so the test isolates CHUNKING mechanics, not detection scoring.
 
 Usage:
-  python tests/make_large_diff.py                       # -> tests/fixtures/large_chunked.diff
-  python tests/make_large_diff.py path/to/out.diff      # custom output path
+  python tests/support/make_large_diff.py                   # -> tests/fixtures/large_chunked.diff
+  python tests/support/make_large_diff.py path/to/out.diff  # custom output path
 """
 import os
 import sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_OUT = os.path.join(ROOT, "tests", "fixtures", "large_chunked.diff")
+# tests/support/ -> tests/ -> fixtures/
+TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_OUT = os.path.join(TESTS, "fixtures", "large_chunked.diff")
 
 
 def file_diff(path, n_funcs):
